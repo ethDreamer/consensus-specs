@@ -1,3 +1,4 @@
+
 # Optimistic Relay v3 -- Networking
 
 This document contains the consensus-layer networking specification for v3 of the optimistic relay roadmap.
@@ -7,12 +8,42 @@ The specification of these changes continues in the same format as the network s
 ## Table of contents
 
 <!-- TOC -->
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
+  - [Modifications in Optimistic Relay v3](#modifications-in-optimistic-relay-v3)
+    - [Configuration](#configuration)
+    - [Containers](#containers)
+    - [New containers](#new-containers)
+      - [`ProposerAuction`](#proposerauction)
+      - [`SignedProposerAuction`](#signedproposerauction)
+      - [`BuilderBid`](#builderbid)
+      - [`SignedBuilderBid`](#signedbuilderbid)
+      - [`BlindedBeaconBlockBody`](#blindedbeaconblockbody)
+      - [`BlindedBeaconBlock`](#blindedbeaconblock)
+      - [`SignedBlindedBeaconBlock`](#signedblindedbeaconblock)
+      - [`AcceptedBuilderBid`](#acceptedbuilderbid)
+      - [`SignedAcceptedBuilderBid`](#signedacceptedbuilderbid)
+    - [The gossip domain: gossipsub](#the-gossip-domain-gossipsub)
+      - [Topics and messages](#topics-and-messages)
+        - [Global topics](#global-topics)
+          - [`proposer_auction`](#proposer_auction)
+          - [`builder_bid`](#builder_bid)
+          - [`accepted_builder_bid`](#accepted_builder_bid)
+      - [Transitioning the gossip](#transitioning-the-gossip)
+- [Design decision rationale](#design-decision-rationale)
+    - [Gossipsub](#gossipsub)
+      - [Why is there no `parent_hash` in the proposer auction?](#why-is-there-no-parent_hash-in-the-proposer-auction)
+      - [What's with this weird `ancestor_root` in the proposer auction?](#whats-with-this-weird-ancestor_root-in-the-proposer-auction)
+      - [How do we expect the network to become aware of builder pubkeys in the beginning?](#how-do-we-expect-the-network-to-become-aware-of-builder-pubkeys-in-the-beginning)
+      - [Why is the accepted builder bid double signed?](#why-is-the-accepted-builder-bid-double-signed)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
 <!-- /TOC -->
 
 ## Modifications in Optimistic Relay v3
 
-## Configuration
+### Configuration
 
 | Name                                  | Value         | Description                                                                           |
 |---------------------------------------|---------------|---------------------------------------------------------------------------------------|
@@ -22,7 +53,7 @@ The specification of these changes continues in the same format as the network s
 | `BUILDER_PUBKEY_RETENTION_PERIOD`     | `2**5` (= 32) | Number of epochs to retain a builder pubkey after the builder wins a proposer auction |
 | `MAX_BUILDER_BIDS_PER_SLOT`           | `2**1` (=2)   | Maximum number of builder bids per slot                                               |
 
-## Containers
+### Containers
 
 ### New containers
 
