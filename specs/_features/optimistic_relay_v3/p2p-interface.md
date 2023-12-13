@@ -14,11 +14,13 @@ The specification of these changes continues in the same format as the network s
 
 ## Configuration
 
-| Name                                     | Value           | Description                                                                     |
-|------------------------------------------|-----------------|---------------------------------------------------------------------------------|
-| `MAX_PROPOSER_AUCTION_SLOT_LOOKAHEAD`    | `2**4` (= 16)   | Maximum number of slots between the current slot and the target slot of a proposer auction |
-| `MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE` | `2**2` (= 4)    | Maximum number of slots between the current slot and the ancestor slot of a proposer auction |
-| `BUILDER_PUBKEY_RETENTION_PERIOD`        | `2**5` (=32)    | Number of epochs to retain a builder pubkey after the builder wins a proposer auction |
+| Name                                  | Value         | Description                                                                           |
+|---------------------------------------|---------------|---------------------------------------------------------------------------------------|
+| `MAX_PROPOSER_AUCTION_SLOT_LOOKAHEAD` | `2**4` (= 16) | Maximum number of slots between the current slot and a proposer auction target slot   |
+| `MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE`| `2**1` (= 2)| Maximum number of slots behind the current slot of a proposer auction ancestor block  |
+| `HALF_BUILDER_BID_WINDOW`             | `2**2` (= 4)  | Number of seconds away from the target slot that a builder bid can be gossiped        |
+| `BUILDER_PUBKEY_RETENTION_PERIOD`     | `2**5` (= 32) | Number of epochs to retain a builder pubkey after the builder wins a proposer auction |
+| `MAX_BUILDER_BIDS_PER_SLOT`           | `2**1` (=2)   | Maximum number of builder bids per slot                                               |
 
 ## Containers
 
@@ -29,7 +31,7 @@ The specification of these changes continues in the same format as the network s
 ```python
 class ProposerAuction(Container):
     fee_recipient: ExecutionAddress
-    ancestor_slot: Slot
+    ancestor_root: Root
     gas_limit: uint64
     slot: Slot
     pubkey: BLSPubkey
@@ -142,12 +144,13 @@ This topic is used to propagate signed proposer auction messages to the builder 
 For convenience we define `current_slot` as the current slot with respect to the wall-clock time with a `MAXIMUM_CLOCK_DISPARITY` allowance. The following validations MUST pass before forwarding the `signed_proposer_auction` on the network:
 
 - _[IGNORE]_ The target slot is greater than or equal to the `current_slot` -- i.e. `signed_proposer_auction.message.slot >= current_slot`.
-- _[IGNORE]_ The `signed_proposer_auction.ancestor_slot` is no more than `MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE` behind the `current_slot` -- i.e. `signed_proposer_auction.message.ancestor_slot + MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE >= current_slot`.
+- _[IGNORE]_ The target slot is no more than `MAX_PROPOSER_AUCTION_SLOT_LOOKAHEAD` ahead of the `current_slot` -- i.e. `signed_proposer_auction.message.slot <= current_slot + MAX_PROPOSER_AUCTION_SLOT_LOOKAHEAD`.
 - _[IGNORE]_ This is the first `signed_proposer_auction` with valid signature received from this proposer for this target slot (defined by `signed_proposer_auction.message.slot`).
-- _[REJECT]_ The target slot is not more than `MAX_PROPOSER_AUCTION_SLOTS_LOOKAHEAD` slots ahead of the ancestor slot -- i.e. `signed_proposer_auction.message.slot <= signed_proposer_auction.message.ancestor_slot + MAX_PROPOSER_AUCTION_SLOTS_LOOKAHEAD`.
 - _[REJECT]_ The public key is from a currently active validator -- i.e. `signed_proposer_auction.message.pubkey` belongs to a `validator` that satisfies `is_active_validator(validator, compute_epoch_at_slot(current_slot))`.
 - _[REJECT]_ The signature, `signed_proposer_auction.signature`, is valid with respect to `signed_proposer_auction.message.pubkey`.
-- _[REJECT]_ The public key belongs to a validator which is the expected proposer for the target slot, `signed_proposer_auction.message.slot`, in the context of the shuffling defined by the ancestor slot, `signed_proposer_auction.message.ancestor_slot`.
+- _[IGNORE]_ The ancestor block (defined by `signed_proposer_auction.message.ancestor_root`) has been seen and has slot within `MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE` slots of the `current_slot` -- i.e. `current_slot >= ancestor_block.slot + MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE` (a client MAY queue signed proposer auctions for processing once the ancestor block is retrieved)
+- _[REJECT]_ The ancestor block (defined by `signed_proposer_auction.message.ancestor_root`) passes validation
+- _[REJECT]_ The public key belongs to a validator which is the expected proposer for the target slot, `signed_proposer_auction.message.slot`, in the context of the shuffling defined by the ancestor root, `signed_proposer_auction.message.ancestor_root`.
 
 ###### `builder_bid`
 
@@ -155,10 +158,11 @@ This topic is used to propagate signed builder bid messages to proposers.
 
 The following validations MUST pass before forwarding the `signed_builder_bid` on the network:
 
+- _[REJECT]_ The nonce is less than `MAX_BUILDER_BIDS_PER_SLOT` -- i.e. `signed_builder_bid.message.nonce < MAX_BUILDER_BIDS_PER_SLOT`
+- _[IGNORE]_ The current wall-clock time is within `HALF_BUILDER_BID_WINDOW` seconds of the target slot's timestamp (with a `MAXIMUM_GOSSIP_CLOCK_DISPARITY` allowance) -- i.e. `now - HALF_BUILDER_BID_WINDOW <= compute_timestamp_at_slot(state, signed_builder_bid.message.header.slot) <= now + HALF_BUILDER_BID_WINDOW`
+- _[IGNORE]_ This is the first bid with valid signature received from this builder for this slot and nonce.
 - _[IGNORE]_ This builder has won an auction within the last `BUILDER_PUBKEY_RETENTION_PERIOD` epochs -- i.e. this node has observed a valid `signed_accepted_builder_bid` for a block within `BUILDER_PUBKEY_RETENTION_PERIOD` epochs of the current epoch with respect to the wall-clock time where `signed_accepted_builder_bid.message.builder_pubkey == signed_builder_bid.message.pubkey`.
 - _[REJECT]_ The signature, `signed_builder_bid.signature`, is valid with respect to `signed_builder_bid.message.pubkey`.
-- _[IGNORE]_ The `signed_builder_bid.message.header.slot` is equal to the current slot with respect to the wall-clock time with a `MAXIMUM_CLOCK_DISPARITY` allowance.
-- _[IGNORE]_ This is the first bid with valid signature recieved for this slot.
 
 ###### `accepted_builder_bid`
 
@@ -170,7 +174,7 @@ The following validations MUST pass before forwarding the `signed_accepted_build
 - _[IGNORE]_ This is the first `signed_accepted_builder_bid` with valid signature received for the proposer for this slot.
 - _[REJECT]_ The proposer signature, `signed_blinded_block.signature`, is valid with respect to the `blinded_block.proposer_index` pubkey.
 - _[REJECT]_ The proposer signature, `signed_accepted_builder_bid.signature`, is valid with respect to the `blinded_block.proposer_index` pubkey.
-- _[IGNORE]_ The block's parent (defined by `blinded_block.parent_root`) has been seen (a client MAY queue `signed_accepted_builder_bids` for processing once the parent block is retrieved).
+- _[IGNORE]_ The block's parent (defined by `blinded_block.parent_root`) has been seen (a client MAY queue accepted builder bids for processing once the parent block is retrieved).
 - _[REJECT]_ The block's parent (defined by `blinded_block.parent_root`) passes validation.
 - _[REJECT]_ The block is from a higher slot than its parent.
 - _[REJECT]_ The current `finalized_checkpoint` is an ancestor of `blinded_block` -- i.e. `get_checkpoint_block(store, block.parent_root, store.finalized_checkpoint.epoch) == store.finalized_checkpoint.root`.
@@ -183,3 +187,22 @@ When a valid `signed_accepted_builder_bid` is observed, clients MUST cache the b
 See gossip transition details found in the [Altair document](../../altair/p2p-interface.md#transitioning-the-gossip) for
 details on how to handle transitioning gossip topics for this upgrade.
 
+# Design decision rationale
+
+### Gossipsub
+
+#### Why is there no `parent_hash` in the proposer auction?
+
+To minimize latency, we want proposers to be able to broadcast a `SignedProposerAuction` several slots before their actual proposal. This precludes including a `parent_hash` in the `SignedProposerAuction`. Note that because builders are able to broadcast up to `MAX_BUILDER_BIDS_PER_SLOT` bids for each slot, they are still able to speculate on more than one `parent_hash`. Proposers still retain the final choice on which `parent_hash` to choose, and under healthy chain conditions the choice is usually clear.
+
+#### What's with this weird `ancestor_root` in the proposer auction?
+
+Since there is no `parent_hash` included in the proposer auction, it is technically unnecessary to anchor proposer auctions to an upcoming block proposal. We anchor it anyway because this is a natural way to mitigate spam. We further mitigate spam by allowing proposers to only transmit one of these messages for a given proposal. Though typically stable within an epoch, the expected proposer for a given slot can change within a single block. Thus we anchor the proposal auction to an ancestor block with root `ancestor_root` for which the shuffling must produce the expected proposer. We avoid restricting the ancestor block to the current head so that nodes can wait longer for the ancestor block to propagate to all nodes before broadcasting their proposer auction.
+
+#### How do we expect the network to become aware of builder pubkeys in the beginning?
+
+When we first enable optimistic relay v3 auctions, we can bootstrap awareness of builder pubkeys from standard mev-boost auctions. This is why proposers are required to broadcast signed accepted builder bids even when they received the bid via RPC.
+
+#### Why is the accepted builder bid double signed?
+
+This is the only way to protect the `builder_pubkey` with the proposer's signature without changing any of the consensus data structures.
