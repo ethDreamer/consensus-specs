@@ -49,7 +49,7 @@ The specification of these changes continues in the same format as the network s
 |---------------------------------------|---------------|---------------------------------------------------------------------------------------|
 | `MAX_PROPOSER_AUCTION_SLOT_LOOKAHEAD` | `2**4` (= 16) | Maximum number of slots between the current slot and a proposer auction target slot   |
 | `MAX_PROPOSER_AUCTION_ANCESTOR_DISTANCE`| `2**1` (= 2)| Maximum number of slots behind the current slot of a proposer auction ancestor block  |
-| `HALF_BUILDER_BID_WINDOW`             | `2**2` (= 4)  | Number of seconds away from the target slot that a builder bid can be gossiped        |
+| `HALF_BUILDER_BID_WINDOW`             | `2**1` (= 2)  | Number of seconds away from the target slot that a builder bid can be gossiped        |
 | `BUILDER_PUBKEY_RETENTION_PERIOD`     | `2**5` (= 32) | Number of epochs to retain a builder pubkey after the builder wins a proposer auction |
 | `MAX_BUILDER_BIDS_PER_SLOT`           | `2**1` (=2)   | Maximum number of builder bids per slot                                               |
 
