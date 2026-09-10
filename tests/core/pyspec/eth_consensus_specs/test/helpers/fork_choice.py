@@ -12,6 +12,7 @@ from eth_consensus_specs.test.helpers.attestations import (
     state_transition_with_full_block,
 )
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
+from eth_consensus_specs.test.helpers.execution_payload import unwrap_execution_payload_envelope
 from eth_consensus_specs.test.helpers.forks import is_post_fulu, is_post_gloas
 from eth_consensus_specs.test.helpers.state import next_epoch, state_transition_and_sign_block
 
@@ -438,7 +439,7 @@ def run_on_execution_payload_envelope(spec, store, signed_envelope, valid=True):
     spec.on_execution_payload_envelope(store, signed_envelope)
 
     # Verify the envelope was processed, block should now have FULL state
-    envelope_root = signed_envelope.message.beacon_block_root
+    envelope_root = unwrap_execution_payload_envelope(spec, signed_envelope).beacon_block_root
     assert envelope_root in store.payloads
 
 

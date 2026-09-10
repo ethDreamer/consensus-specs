@@ -1,4 +1,5 @@
 from eth_consensus_specs.test.context import expect_assertion_error
+from eth_consensus_specs.test.helpers.execution_payload import commit_bid_to_payload_chunks
 from eth_consensus_specs.test.helpers.forks import is_post_heze
 from eth_consensus_specs.test.helpers.keys import builder_privkeys
 
@@ -102,6 +103,7 @@ def prepare_signed_execution_payload_bid(
         bid_kwargs["inclusion_list_bits"] = inclusion_list_bits
 
     bid = spec.ExecutionPayloadBid(**bid_kwargs)
+    commit_bid_to_payload_chunks(spec, bid, spec.ExecutionPayload())
 
     if valid_signature:
         # Check if this is a self-build case

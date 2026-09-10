@@ -1,0 +1,13 @@
+# Minimal preset - EIP8142
+
+# Execution payload chunks
+# ---------------------------------------------------------------
+# [customized] 2**9 (= 512) bytes
+PAYLOAD_CHUNK_SIZE: 512
+# [customized] 2**7 (= 128)
+MAX_PAYLOAD_CHUNKS: 128
+
+# Type-specific SSZ bounds
+# ---------------------------------------------------------------
+# 196,974 bytes, ~192 KiB
+MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_EIP8142: 196974

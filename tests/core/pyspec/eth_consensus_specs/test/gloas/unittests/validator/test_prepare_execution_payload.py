@@ -10,6 +10,8 @@ from eth_consensus_specs.test.helpers.consolidations import (
 )
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
+    commit_block_bid_to_payload_chunks,
+    unwrap_execution_payload_envelope,
 )
 from eth_consensus_specs.test.helpers.fork_choice import (
     get_genesis_forkchoice_store_and_block,
@@ -57,6 +59,7 @@ def _add_block_to_store(spec, state, execution_requests=None):
     if execution_requests is not None:
         bid = block.body.signed_execution_payload_bid.message
         bid.execution_requests_root = spec.hash_tree_root(execution_requests)
+        commit_block_bid_to_payload_chunks(spec, state, block, execution_requests)
         if bid.builder_index == spec.BUILDER_INDEX_SELF_BUILD:
             block.body.signed_execution_payload_bid = spec.SignedExecutionPayloadBid(
                 message=bid,
@@ -162,7 +165,9 @@ def test_prepare_execution_payload__extend_payload(spec, state):
     assert engine.head_block_hash == parent_bid.block_hash
 
     expected_state = proposal_state.copy()
-    spec.apply_parent_execution_payload(expected_state, envelope.message.execution_requests)
+    spec.apply_parent_execution_payload(
+        expected_state, unwrap_execution_payload_envelope(spec, envelope).execution_requests
+    )
     expected_withdrawals = spec.get_expected_withdrawals(expected_state).withdrawals
     assert engine.payload_attributes.withdrawals == expected_withdrawals
 

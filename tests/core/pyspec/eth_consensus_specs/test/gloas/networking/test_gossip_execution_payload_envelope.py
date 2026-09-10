@@ -1,8 +1,9 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
-    with_gloas_and_later,
+    with_all_phases_from_except,
 )
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
+from eth_consensus_specs.test.helpers.constants import EIP8142, GLOAS
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
 )
@@ -33,7 +34,7 @@ def setup_store_with_block(spec, state):
     return store, [signed_anchor, signed_block], signed_block, block_root
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid(spec, state):
     """A well-formed envelope for a known block passes gossip validation."""
@@ -71,7 +72,7 @@ def test_gossip_execution_payload_envelope__valid(spec, state):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__ignore_block_unseen(spec, state):
     """An envelope referencing an unknown beacon block is ignored."""
@@ -116,7 +117,7 @@ def test_gossip_execution_payload_envelope__ignore_block_unseen(spec, state):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__ignore_duplicate(spec, state):
     """The second valid envelope for the same (block_root, builder) is ignored."""
@@ -169,7 +170,7 @@ def test_gossip_execution_payload_envelope__ignore_duplicate(spec, state):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_slot_mismatch(spec, state):
     """An envelope whose payload.slot_number does not match block.slot is rejected."""
@@ -209,7 +210,7 @@ def test_gossip_execution_payload_envelope__reject_slot_mismatch(spec, state):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_block_hash_mismatch(spec, state):
     """An envelope whose payload.block_hash does not match the bid is rejected."""
@@ -249,7 +250,7 @@ def test_gossip_execution_payload_envelope__reject_block_hash_mismatch(spec, sta
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_invalid_signature(spec, state):
     """An envelope with an invalid signature is rejected."""
@@ -289,7 +290,7 @@ def test_gossip_execution_payload_envelope__reject_invalid_signature(spec, state
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__ignore_pre_finalized(spec, state):
     """An envelope whose payload slot is before the latest finalized slot is ignored."""
@@ -342,7 +343,7 @@ def test_gossip_execution_payload_envelope__ignore_pre_finalized(spec, state):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_block_failed_validation(spec, state):
     """An envelope whose block failed validation is rejected."""
@@ -389,7 +390,7 @@ def test_gossip_execution_payload_envelope__reject_block_failed_validation(spec,
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_builder_index_mismatch(spec, state):
     """An envelope whose builder_index does not match the bid's builder_index is rejected."""
@@ -433,7 +434,7 @@ def test_gossip_execution_payload_envelope__reject_builder_index_mismatch(spec, 
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_execution_requests_root_mismatch(spec, state):
     """An envelope whose execution_requests root does not match the bid's is rejected."""
@@ -582,7 +583,7 @@ def _assert_envelope_withdrawals(spec, state, count, expected, reason=None):
     yield "messages", "meta", messages
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid_max_withdrawal_requests(spec, state):
     """An envelope with the maximum number of withdrawal requests is valid."""
@@ -593,7 +594,7 @@ def test_gossip_execution_payload_envelope__valid_max_withdrawal_requests(spec, 
     yield from _assert_envelope_requests(spec, state, requests, "valid")
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_too_many_withdrawal_requests(spec, state):
     """An envelope whose execution requests exceed the withdrawal-request limit is rejected."""
@@ -606,7 +607,7 @@ def test_gossip_execution_payload_envelope__reject_too_many_withdrawal_requests(
     )
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid_max_consolidation_requests(spec, state):
     """An envelope with the maximum number of consolidation requests is valid."""
@@ -617,7 +618,7 @@ def test_gossip_execution_payload_envelope__valid_max_consolidation_requests(spe
     yield from _assert_envelope_requests(spec, state, requests, "valid")
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_too_many_consolidation_requests(spec, state):
     """An envelope whose execution requests exceed the consolidation-request limit is rejected."""
@@ -630,7 +631,7 @@ def test_gossip_execution_payload_envelope__reject_too_many_consolidation_reques
     )
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid_max_builder_deposit_requests(spec, state):
     """An envelope with the maximum number of builder deposit requests is valid."""
@@ -641,7 +642,7 @@ def test_gossip_execution_payload_envelope__valid_max_builder_deposit_requests(s
     yield from _assert_envelope_requests(spec, state, requests, "valid")
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_too_many_builder_deposit_requests(spec, state):
     """An envelope whose execution requests exceed the builder-deposit-request limit is rejected."""
@@ -654,7 +655,7 @@ def test_gossip_execution_payload_envelope__reject_too_many_builder_deposit_requ
     )
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid_max_builder_exit_requests(spec, state):
     """An envelope with the maximum number of builder exit requests is valid."""
@@ -665,7 +666,7 @@ def test_gossip_execution_payload_envelope__valid_max_builder_exit_requests(spec
     yield from _assert_envelope_requests(spec, state, requests, "valid")
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_too_many_builder_exit_requests(spec, state):
     """An envelope whose execution requests exceed the builder-exit-request limit is rejected."""
@@ -678,7 +679,7 @@ def test_gossip_execution_payload_envelope__reject_too_many_builder_exit_request
     )
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__valid_max_withdrawals(spec, state):
     """An envelope with the maximum number of payload withdrawals is valid."""
@@ -686,7 +687,7 @@ def test_gossip_execution_payload_envelope__valid_max_withdrawals(spec, state):
     yield from _assert_envelope_withdrawals(spec, state, count, "valid")
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 def test_gossip_execution_payload_envelope__reject_too_many_withdrawals(spec, state):
     """An envelope whose payload carries more withdrawals than the limit is rejected."""

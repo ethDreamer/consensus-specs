@@ -1,0 +1,13 @@
+# Mainnet preset - EIP8142
+
+# Execution payload chunks
+# ---------------------------------------------------------------
+# 2**15 (= 32,768) bytes, 32 KiB
+PAYLOAD_CHUNK_SIZE: 32768
+# 2**12 (= 4,096)
+MAX_PAYLOAD_CHUNKS: 4096
+
+# Type-specific SSZ bounds
+# ---------------------------------------------------------------
+# 196,974 bytes, ~192 KiB
+MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_EIP8142: 196974

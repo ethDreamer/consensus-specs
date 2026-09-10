@@ -24,9 +24,11 @@ from eth_consensus_specs.test.helpers.block import (
     build_empty_block_for_next_slot,
 )
 from eth_consensus_specs.test.helpers.bls_to_execution_changes import get_signed_address_change
+from eth_consensus_specs.test.helpers.execution_payload import commit_bid_to_payload_chunks
 from eth_consensus_specs.test.helpers.execution_requests import (
     get_non_empty_execution_requests,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_eip8142
 from eth_consensus_specs.test.helpers.keys import builder_privkeys, privkeys
 from eth_consensus_specs.test.helpers.multi_operations import (
     get_random_attestations,
@@ -120,6 +122,11 @@ def _attempt_payload_with_withdrawals(spec, state, withdrawals):
         slot_number=test_state.slot,
     )
 
+    if is_post_eip8142(spec):
+        # Envelopes are unsigned. Commit the cached bid to this payload so that
+        # only the withdrawals decide the outcome.
+        commit_bid_to_payload_chunks(spec, test_state.latest_execution_payload_bid, payload)
+
     # Cache state root for beacon_block_root computation
     header = test_state.latest_block_header.copy()
     header.state_root = test_state.hash_tree_root()
@@ -132,16 +139,19 @@ def _attempt_payload_with_withdrawals(spec, state, withdrawals):
         parent_beacon_block_root=test_state.latest_block_header.parent_root,
     )
 
-    if envelope.builder_index == spec.BUILDER_INDEX_SELF_BUILD:
-        privkey = privkeys[test_state.latest_block_header.proposer_index]
+    if is_post_eip8142(spec):
+        signed_envelope = envelope
     else:
-        privkey = builder_privkeys[envelope.builder_index]
-    signature = spec.get_execution_payload_envelope_signature(test_state, envelope, privkey)
+        if envelope.builder_index == spec.BUILDER_INDEX_SELF_BUILD:
+            privkey = privkeys[test_state.latest_block_header.proposer_index]
+        else:
+            privkey = builder_privkeys[envelope.builder_index]
+        signature = spec.get_execution_payload_envelope_signature(test_state, envelope, privkey)
 
-    signed_envelope = spec.SignedExecutionPayloadEnvelope(
-        message=envelope,
-        signature=signature,
-    )
+        signed_envelope = spec.SignedExecutionPayloadEnvelope(
+            message=envelope,
+            signature=signature,
+        )
 
     engine = spec.NoopExecutionEngine()
 

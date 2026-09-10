@@ -201,6 +201,17 @@ _MESSAGE_INFO = {
         "validation_fn": "validate_execution_proof_gossip",
     },
     ###########################################################################
+    # eip8142
+    ###########################################################################
+    "ExecutionPayloadEnvelope": {
+        "file_prefix": "execution_payload_envelope",
+        "validation_fn": None,
+    },
+    "ExecutionPayloadChunk": {
+        "file_prefix": "execution_payload_chunk",
+        "validation_fn": "validate_execution_payload_chunk_gossip",
+    },
+    ###########################################################################
     # eip8321
     ###########################################################################
     "SignedRandaoCommitmentRegistration": {

@@ -9,6 +9,7 @@ from eth_consensus_specs.test.helpers.attestations import (
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
+    unwrap_execution_payload_envelope,
 )
 from eth_consensus_specs.test.helpers.fork_choice import (
     get_genesis_forkchoice_store_and_block,
@@ -243,7 +244,7 @@ def prepare_past_slot_attestation(spec, state, payload_index, install_payload=Fa
         signed_envelope = build_signed_execution_payload_envelope(
             spec, state, block_root, signed_block
         )
-        store.payloads[block_root] = signed_envelope.message
+        store.payloads[block_root] = unwrap_execution_payload_envelope(spec, signed_envelope)
 
     # Advance state to a later slot so data.slot != block.slot.
     next_slot(spec, state)

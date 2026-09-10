@@ -4,6 +4,8 @@ from eth_consensus_specs.test.helpers.attestations import (
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
+    commit_bid_to_payload_chunks,
+    unwrap_execution_payload_envelope,
 )
 from eth_consensus_specs.test.helpers.execution_payload_bid import (
     prepare_signed_execution_payload_bid,
@@ -66,7 +68,7 @@ def record_head_payload(spec, state, store, blocks, execution_requests=None):
     signed_envelope = build_signed_execution_payload_envelope(
         spec, state, head_root, head_signed_block, execution_requests=execution_requests
     )
-    store.payloads[head_root] = signed_envelope.message
+    store.payloads[head_root] = unwrap_execution_payload_envelope(spec, signed_envelope)
     return signed_envelope
 
 
@@ -316,6 +318,7 @@ def build_signed_bid(
         blob_kzg_commitments=spec.BlobKZGCommitments(data=blob_kzg_commitments),
         execution_requests_root=spec.hash_tree_root(spec.ExecutionRequests()),
     )
+    commit_bid_to_payload_chunks(spec, bid, spec.ExecutionPayload())
     if valid_signature and builder_index < len(builder_privkeys):
         privkey = builder_privkeys[builder_index]
         signature = spec.get_execution_payload_bid_signature(state, bid, privkey)

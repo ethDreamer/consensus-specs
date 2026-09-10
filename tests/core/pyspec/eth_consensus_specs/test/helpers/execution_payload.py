@@ -9,6 +9,7 @@ from eth_consensus_specs.debug.random_value import get_random_bytes_list
 from eth_consensus_specs.test.helpers.forks import (
     is_post_capella,
     is_post_deneb,
+    is_post_eip8142,
     is_post_electra,
     is_post_gloas,
 )
@@ -51,7 +52,7 @@ def get_execution_payload_bid(spec, state, execution_payload):
     kzg_list = spec.BlobKZGCommitments()
     builder_index = spec.get_beacon_proposer_index(state)
 
-    return spec.ExecutionPayloadBid(
+    bid = spec.ExecutionPayloadBid(
         parent_block_hash=execution_payload.parent_hash,
         parent_block_root=parent_block_root,
         block_hash=execution_payload.block_hash,
@@ -63,6 +64,58 @@ def get_execution_payload_bid(spec, state, execution_payload):
         blob_kzg_commitments=spec.BlobKZGCommitments(data=kzg_list),
         execution_requests_root=spec.hash_tree_root(spec.ExecutionRequests()),
     )
+    commit_bid_to_payload_chunks(spec, bid, execution_payload)
+    return bid
+
+
+def get_execution_payload_contents(spec, payload, execution_requests=None):
+    assert is_post_eip8142(spec)
+
+    if execution_requests is None:
+        execution_requests = spec.ExecutionRequests()
+
+    return spec.ExecutionPayloadContents(
+        payload=payload,
+        execution_requests=execution_requests,
+    )
+
+
+def get_payload_chunks_commitment(spec, payload, execution_requests=None):
+    """
+    Return the ``(payload_chunks_root, payload_length)`` a bid commits to for
+    ``payload`` and ``execution_requests``.
+    """
+    contents = get_execution_payload_contents(spec, payload, execution_requests)
+    payload_bytes = spec.ssz_serialize(contents)
+    chunks = spec.compute_payload_chunks(payload_bytes)
+    return spec.compute_payload_chunks_root(chunks), spec.Uint64(len(payload_bytes))
+
+
+def commit_bid_to_payload_chunks(spec, bid, payload, execution_requests=None):
+    """
+    Point ``bid`` at the chunks of ``payload`` and ``execution_requests``,
+    which is a no-op before envelopes are disseminated as chunks.
+    """
+    if not is_post_eip8142(spec):
+        return
+    bid.payload_chunks_root, bid.payload_length = get_payload_chunks_commitment(
+        spec, payload, execution_requests
+    )
+
+
+def get_execution_payload_chunks(spec, block, payload, execution_requests=None):
+    contents = get_execution_payload_contents(spec, payload, execution_requests)
+    return spec.get_execution_payload_chunks(block, contents)
+
+
+def unwrap_execution_payload_envelope(spec, signed_envelope):
+    """
+    Return the envelope message. Once envelopes are no longer signed, the
+    helpers that used to return a signed envelope return the envelope itself.
+    """
+    if is_post_eip8142(spec):
+        return signed_envelope
+    return signed_envelope.message
 
 
 # https://eips.ethereum.org/EIPS/eip-2718
@@ -304,7 +357,7 @@ def build_empty_post_gloas_execution_payload_bid(spec, state):
     # is_parent_node_full correctly return False
     empty_payload_hash = spec.Hash32(b"\x01" + b"\x00" * 31)
     prev_randao = spec.get_randao_mix(state, spec.get_current_epoch(state))
-    return spec.ExecutionPayloadBid(
+    bid = spec.ExecutionPayloadBid(
         parent_block_hash=state.latest_block_hash,
         parent_block_root=parent_block_root,
         block_hash=empty_payload_hash,
@@ -317,6 +370,9 @@ def build_empty_post_gloas_execution_payload_bid(spec, state):
         blob_kzg_commitments=spec.BlobKZGCommitments(data=kzg_list),
         execution_requests_root=spec.hash_tree_root(spec.ExecutionRequests()),
     )
+    # Commit to some payload so that the bid is valid on its own
+    commit_bid_to_payload_chunks(spec, bid, spec.ExecutionPayload())
+    return bid
 
 
 def sign_execution_payload_bid(spec, state, bid):
@@ -485,6 +541,10 @@ def build_state_with_execution_payload_bid(spec, state, execution_payload_bid):
 
 
 def sign_execution_payload_envelope(spec, state, signed_block, envelope):
+    # Envelopes are authenticated by the bid's chunk commitment, not a signature
+    if is_post_eip8142(spec):
+        return envelope
+
     # Sign the envelope: self-builds use proposer key, external builds use builder key
     if envelope.builder_index == spec.BUILDER_INDEX_SELF_BUILD:
         privkey = privkeys[signed_block.message.proposer_index]
@@ -498,6 +558,47 @@ def sign_execution_payload_envelope(spec, state, signed_block, envelope):
     )
 
 
+def build_execution_payload_for_bid(spec, state):
+    """
+    Build the empty payload that honors the bid cached in ``state``, which must
+    be the post-state of the block carrying that bid, or at least have the
+    bid, withdrawals, and latest block hash that state will have.
+    """
+    payload = build_empty_execution_payload(spec, state)
+    payload.block_hash = state.latest_execution_payload_bid.block_hash
+    payload.gas_limit = state.latest_execution_payload_bid.gas_limit
+    payload.parent_hash = state.latest_block_hash
+    payload.withdrawals = state.payload_expected_withdrawals
+    return payload
+
+
+def commit_block_bid_to_payload_chunks(spec, state, block, execution_requests=None):
+    """
+    Point the bid of ``block`` at the chunks of the payload that
+    ``build_signed_execution_payload_envelope`` derives for it, by simulating
+    the part of block processing that precedes the bid on a copy of the
+    pre-state ``state``.
+    """
+    if not is_post_eip8142(spec):
+        return
+    post = state.copy()
+    if post.slot < block.slot:
+        spec.process_slots(post, block.slot)
+    try:
+        spec.process_parent_execution_payload(post, block)
+        spec.process_withdrawals(post)
+    except AssertionError:
+        # The block does not yet deliver its parent's execution requests, so
+        # the withdrawals it will commit to are unknown. Tests that complete
+        # the block later must commit its bid again.
+        pass
+    post.latest_execution_payload_bid = block.body.signed_execution_payload_bid.message
+    payload = build_execution_payload_for_bid(spec, post)
+    commit_bid_to_payload_chunks(
+        spec, block.body.signed_execution_payload_bid.message, payload, execution_requests
+    )
+
+
 def build_signed_execution_payload_envelope(
     spec, state, block_root, signed_block, execution_requests=None
 ):
@@ -505,11 +606,7 @@ def build_signed_execution_payload_envelope(
     builder_index = signed_block.message.body.signed_execution_payload_bid.message.builder_index
 
     # Create execution payload with fields matching the bid's commitments
-    payload = build_empty_execution_payload(spec, state)
-    payload.block_hash = state.latest_execution_payload_bid.block_hash
-    payload.gas_limit = state.latest_execution_payload_bid.gas_limit
-    payload.parent_hash = state.latest_block_hash
-    payload.withdrawals = state.payload_expected_withdrawals
+    payload = build_execution_payload_for_bid(spec, state)
 
     if execution_requests is None:
         execution_requests = spec.ExecutionRequests()
@@ -536,7 +633,7 @@ def compute_execution_payload_bid(spec, state, payload, execution_requests=None)
     kzg_list = spec.BlobKZGCommitments()
     # Use self-build: builder_index is the same as the beacon proposer index
     builder_index = spec.BUILDER_INDEX_SELF_BUILD
-    return spec.ExecutionPayloadBid(
+    bid = spec.ExecutionPayloadBid(
         parent_block_hash=payload.parent_hash,
         parent_block_root=parent_block_root,
         block_hash=payload.block_hash,
@@ -549,6 +646,8 @@ def compute_execution_payload_bid(spec, state, payload, execution_requests=None)
         blob_kzg_commitments=spec.BlobKZGCommitments(data=kzg_list),
         execution_requests_root=spec.hash_tree_root(execution_requests),
     )
+    commit_bid_to_payload_chunks(spec, bid, payload, execution_requests)
+    return bid
 
 
 def compute_and_sign_execution_payload_bid(spec, state, payload, execution_requests=None):

@@ -8,6 +8,7 @@ from eth_consensus_specs.test.helpers.block import (
 )
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
+    unwrap_execution_payload_envelope,
 )
 from eth_consensus_specs.test.helpers.fork_choice import (
     get_genesis_forkchoice_store_and_block,
@@ -88,7 +89,7 @@ def test_gossip_beacon_block__valid_parent_full(spec, state):
     signed_envelope = build_signed_execution_payload_envelope(
         spec, state, anchor_root, signed_anchor
     )
-    store.payloads[anchor_root] = signed_envelope.message
+    store.payloads[anchor_root] = unwrap_execution_payload_envelope(spec, signed_envelope)
     yield get_filename(signed_envelope), signed_envelope
     yield (
         "blocks",

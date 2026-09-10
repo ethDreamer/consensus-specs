@@ -1,4 +1,4 @@
-from eth_consensus_specs.test.helpers.forks import is_post_heze
+from eth_consensus_specs.test.helpers.forks import is_post_eip8142, is_post_heze
 
 
 def build_max_size_attestation(spec):
@@ -102,6 +102,8 @@ def get_max_signed_execution_payload_bid_size(spec):
     size = spec.MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE
     if is_post_heze(spec):
         size = spec.MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_HEZE
+    if is_post_eip8142(spec):
+        size = spec.MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_EIP8142
     return size
 
 

@@ -1,11 +1,13 @@
 from eth_consensus_specs.test.context import (
     always_bls,
     spec_state_test,
+    with_all_phases_from_except,
     with_gloas_and_later,
 )
 from eth_consensus_specs.test.helpers.block import (
     build_empty_block_for_next_slot,
 )
+from eth_consensus_specs.test.helpers.constants import EIP8142, GLOAS
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_empty_execution_payload,
     build_signed_execution_payload_envelope,
@@ -18,6 +20,7 @@ from eth_consensus_specs.test.helpers.fork_choice import (
     tick_and_add_block,
     tick_store_to_slot,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_eip8142
 from eth_consensus_specs.test.helpers.keys import builder_privkeys, privkeys
 from eth_consensus_specs.test.helpers.state import (
     state_transition_and_sign_block,
@@ -56,6 +59,13 @@ def _build_invalid_envelope(spec, state, block_root, signed_block, **overrides):
             "parent_beacon_block_root", state.latest_block_header.parent_root
         ),
     )
+
+    if is_post_eip8142(spec):
+        # Envelopes are no longer signed. The counterpart of a bad signature
+        # is a payload the bid does not commit to.
+        if not overrides.pop("valid_signature", True):
+            envelope.payload.extra_data = spec.ExtraData(data=[0x42])
+        return envelope
 
     if overrides.pop("valid_signature", True):
         if envelope.builder_index == spec.BUILDER_INDEX_SELF_BUILD:
@@ -101,7 +111,7 @@ def test_on_execution_payload_envelope_valid(spec, state):
 #
 
 
-@with_gloas_and_later
+@with_all_phases_from_except(GLOAS, [EIP8142])
 @spec_state_test
 @always_bls
 def test_on_execution_payload_envelope_wrong_signature(spec, state):

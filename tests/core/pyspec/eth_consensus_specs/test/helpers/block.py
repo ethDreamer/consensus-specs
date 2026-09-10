@@ -4,6 +4,7 @@ from eth_consensus_specs.test.helpers.eip8321.randao import (
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_empty_execution_payload,
     build_empty_signed_execution_payload_bid,
+    commit_block_bid_to_payload_chunks,
     compute_and_sign_execution_payload_bid,
 )
 from eth_consensus_specs.test.helpers.forks import (
@@ -130,6 +131,7 @@ def build_empty_block(spec, state, slot=None, proposer_index=None):
         empty_requests_root = spec.hash_tree_root(spec.ExecutionRequests())
         signed_bid.message.execution_requests_root = empty_requests_root
         empty_block.body.signed_execution_payload_bid = signed_bid
+        commit_block_bid_to_payload_chunks(spec, state, empty_block)
         return empty_block
 
     if is_post_bellatrix(spec):
