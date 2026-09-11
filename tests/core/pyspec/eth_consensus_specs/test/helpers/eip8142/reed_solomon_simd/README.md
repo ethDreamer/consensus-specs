@@ -7,12 +7,13 @@ EIP-8142 specification reproduces them, which shows that the specification's
 evaluation points and layout are those computed by additive FFT implementations
 over the Cantor basis.
 
-The crate represents field elements by their coordinates in the Cantor basis
-and pairs the bytes of a shard into symbols block-wise, so the check translates
-its output into the specification's representation before comparing.
+The crate represents field elements by their coordinates in the Cantor basis and
+pairs the bytes of a shard into symbols block-wise, so the check translates its
+output into the specification's representation before comparing.
 
 Each case gives `original_count`, `shard_bytes`, and the `original` and
 `recovery` shards as hex. The originals are pseudo-random bytes. They were
-produced with `reed_solomon_simd::encode(original_count, original_count,
-original)` by a throwaway program outside this repository, and any program that
-feeds the listed originals to that function reproduces the recovery shards.
+produced with
+`reed_solomon_simd::encode(original_count, original_count, original)` by a
+throwaway program outside this repository, and any program that feeds the listed
+originals to that function reproduces the recovery shards.
