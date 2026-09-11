@@ -47,6 +47,7 @@ specifications of previous upgrades, and assumes them as pre-requisite.
 | Name                                            | Value                         |
 | ----------------------------------------------- | ----------------------------- |
 | `MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_EIP8142` | `Uint64(196974)` (= ~192 KiB) |
+| `MAX_EXECUTION_PAYLOAD_CHUNK_SIZE`              | `Uint64(1048884)` (= ~1 MiB)  |
 
 ## Types
 
@@ -158,7 +159,7 @@ def verify_execution_payload_chunk_proof(
     """
     gindex = get_subtree_index(get_generalized_index(PayloadChunkHashes, chunk.index))
     return is_valid_merkle_branch(
-        leaf=sha256(chunk.data),
+        leaf=sha256(bytes(chunk.data)),
         branch=chunk.proof,
         depth=PAYLOAD_CHUNK_PROOF_DEPTH,
         index=gindex,
@@ -234,7 +235,7 @@ The following validations are added, assuming the alias
 
 - _[REJECT]_ The bid commits to a payload that can be disseminated as chunks --
   i.e. validate that `bid.payload_length > 0` and
-  `get_payload_chunk_count(bid.payload_length) <= MAX_PAYLOAD_CHUNKS`.
+  `get_payload_chunk_size(bid.payload_length) <= MAX_PAYLOAD_CHUNK_SIZE`.
 
 ##### New `execution_payload_chunk`
 
@@ -296,6 +297,10 @@ def validate_execution_payload_chunk_gossip(
     if chunk.index >= get_payload_chunk_count(bid.payload_length):
         raise GossipReject("chunk's index is out of range")
 
+    # [REJECT] The chunk's data has the chunk size the bid's payload length implies
+    if len(chunk.data) != get_payload_chunk_size(bid.payload_length):
+        raise GossipReject("chunk's data has the wrong size")
+
     # [REJECT] The chunk's proof is valid against the chunks root committed to by the bid
     if not verify_execution_payload_chunk_proof(chunk, bid.payload_chunks_root):
         raise GossipReject("invalid chunk proof")
@@ -318,9 +323,9 @@ Chunks for a block root MAY be discarded once its payload is verified, once its
 block is orphaned, or once its slot is finalized. Chunks that arrive before
 their block MAY be queued, subject to per-peer and per-slot limits.
 
-*Note*: With the default preset, the first `get_payload_data_chunk_count` chunks
-hold the serialized payload verbatim, so a node that receives every data chunk
-needs no decoding to reconstruct the payload.
+*Note*: The first `get_payload_data_chunk_count` chunks hold the serialized
+payload verbatim, so a node that receives every data chunk needs no decoding to
+reconstruct the payload.
 
 ## The Req/Resp domain
 

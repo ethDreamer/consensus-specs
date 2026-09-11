@@ -2,12 +2,16 @@
 
 # Execution payload chunks
 # ---------------------------------------------------------------
-# 2**15 (= 32,768) bytes, 32 KiB
-PAYLOAD_CHUNK_SIZE: 32768
-# 2**12 (= 4,096)
-MAX_PAYLOAD_CHUNKS: 4096
+# 2**6 (= 64)
+MAX_PAYLOAD_DATA_CHUNKS: 64
+# 2**14 (= 16,384) bytes, 16 KiB
+MIN_PAYLOAD_CHUNK_SIZE: 16384
+# 2**20 (= 1,048,576) bytes, 1 MiB
+MAX_PAYLOAD_CHUNK_SIZE: 1048576
 
 # Type-specific SSZ bounds
 # ---------------------------------------------------------------
 # 196,974 bytes, ~192 KiB
 MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE_EIP8142: 196974
+# 1,048,884 bytes, ~1 MiB
+MAX_EXECUTION_PAYLOAD_CHUNK_SIZE: 1048884

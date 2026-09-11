@@ -11,9 +11,9 @@
   - [New `PayloadChunkHashes`](#new-payloadchunkhashes)
 - [Constants](#constants)
   - [Erasure coding](#erasure-coding)
-  - [Merkle proofs](#merkle-proofs)
-- [Presets](#presets)
   - [Execution payload chunks](#execution-payload-chunks)
+- [Presets](#presets)
+  - [Execution payload chunks](#execution-payload-chunks-1)
 - [Containers](#containers)
   - [New containers](#new-containers)
     - [`ExecutionPayloadContents`](#executionpayloadcontents)
@@ -27,6 +27,7 @@
     - [New `gf16_inverse`](#new-gf16_inverse)
     - [New `compute_lagrange_coefficients`](#new-compute_lagrange_coefficients)
   - [Misc](#misc)
+    - [New `get_payload_chunk_size`](#new-get_payload_chunk_size)
     - [New `get_payload_data_chunk_count`](#new-get_payload_data_chunk_count)
     - [New `get_payload_chunk_count`](#new-get_payload_chunk_count)
     - [New `compute_payload_chunk`](#new-compute_payload_chunk)
@@ -55,6 +56,12 @@ and commits to the hashes of all chunks in the execution payload bid. Each chunk
 travels with a Merkle proof against that commitment, so nodes verify and forward
 chunks independently without waiting for the whole payload.
 
+Chunks are `MIN_PAYLOAD_CHUNK_SIZE` bytes until the payload needs more than
+`MAX_PAYLOAD_DATA_CHUNKS` of them, beyond which the chunks grow instead of the
+chunk count. The number of chunks is therefore bounded, so the erasure code
+operates on a fixed maximum size, the number of messages per payload is bounded,
+and the work to encode a payload grows linearly with its size.
+
 The bid signature binds the chunk commitment, so the execution payload envelope
 no longer carries a signature of its own.
 
@@ -74,12 +81,12 @@ class PayloadChunkIndex(Uint64):
 ### New `PayloadChunkData`
 
 ```python
-class PayloadChunkData(ByteVector):
+class PayloadChunkData(ByteList):
     """
     The bytes of a single execution payload chunk.
     """
 
-    LENGTH = PAYLOAD_CHUNK_SIZE
+    LIMIT = MAX_PAYLOAD_CHUNK_SIZE
 ```
 
 ### New `PayloadChunkHashes`
@@ -103,20 +110,22 @@ class PayloadChunkHashes(List[Bytes32]):
 | `PAYLOAD_CHUNK_SYMBOL_SIZE`      | `Uint64(2)`       | Bytes per GF(2^16) symbol                                    |
 | `PAYLOAD_CHUNK_EXTENSION_FACTOR` | `Uint64(2)`       | Total chunks per data chunk                                  |
 
-### Merkle proofs
+### Execution payload chunks
 
-| Name                        | Value                                              |
-| --------------------------- | -------------------------------------------------- |
-| `PAYLOAD_CHUNK_PROOF_DEPTH` | `Uint64(floorlog2(MAX_PAYLOAD_CHUNKS) + 1)` (= 13) |
+| Name                        | Value                                                                      | Description                              |
+| --------------------------- | -------------------------------------------------------------------------- | ---------------------------------------- |
+| `MAX_PAYLOAD_CHUNKS`        | `Uint64(PAYLOAD_CHUNK_EXTENSION_FACTOR * MAX_PAYLOAD_DATA_CHUNKS)` (= 128) | Data and parity chunks per payload       |
+| `PAYLOAD_CHUNK_PROOF_DEPTH` | `Uint64(floorlog2(MAX_PAYLOAD_CHUNKS) + 1)` (= 8)                          | Depth of a chunk hash in the chunks root |
 
 ## Presets
 
 ### Execution payload chunks
 
-| Name                 | Value                      |
-| -------------------- | -------------------------- |
-| `PAYLOAD_CHUNK_SIZE` | `Uint64(2**15)` (= 32,768) |
-| `MAX_PAYLOAD_CHUNKS` | `Uint64(2**12)` (= 4,096)  |
+| Name                      | Value                         | Description                                |
+| ------------------------- | ----------------------------- | ------------------------------------------ |
+| `MAX_PAYLOAD_DATA_CHUNKS` | `Uint64(2**6)` (= 64)         | Data chunks per payload, once chunks grow  |
+| `MIN_PAYLOAD_CHUNK_SIZE`  | `Uint64(2**14)` (= 16,384)    | Chunk size in bytes until the count is hit |
+| `MAX_PAYLOAD_CHUNK_SIZE`  | `Uint64(2**20)` (= 1,048,576) | Bound on the chunk size in bytes           |
 
 ## Containers
 
@@ -293,15 +302,38 @@ def compute_lagrange_coefficients(points: Sequence[int], target: int) -> Sequenc
 
 ### Misc
 
+#### New `get_payload_chunk_size`
+
+```python
+def get_payload_chunk_size(payload_length: Uint64) -> Uint64:
+    """
+    Return the chunk size for a serialized payload of ``payload_length``
+    bytes. Chunks are ``MIN_PAYLOAD_CHUNK_SIZE`` bytes unless the payload
+    would then need more than ``MAX_PAYLOAD_DATA_CHUNKS`` of them, in which
+    case they grow to hold it in that many. Chunks hold whole symbols, so
+    the size is rounded up to a multiple of ``PAYLOAD_CHUNK_SYMBOL_SIZE``.
+    """
+    chunk_size = max(
+        MIN_PAYLOAD_CHUNK_SIZE,
+        (payload_length + MAX_PAYLOAD_DATA_CHUNKS - 1) // MAX_PAYLOAD_DATA_CHUNKS,
+    )
+    remainder = chunk_size % PAYLOAD_CHUNK_SYMBOL_SIZE
+    if remainder != 0:
+        chunk_size += PAYLOAD_CHUNK_SYMBOL_SIZE - remainder
+    return chunk_size
+```
+
 #### New `get_payload_data_chunk_count`
 
 ```python
 def get_payload_data_chunk_count(payload_length: Uint64) -> Uint64:
     """
     Return the number of chunks needed to hold a serialized payload of
-    ``payload_length`` bytes, the last of which is zero-padded.
+    ``payload_length`` bytes, the last of which is zero-padded. This is at
+    most ``MAX_PAYLOAD_DATA_CHUNKS``.
     """
-    return (payload_length + PAYLOAD_CHUNK_SIZE - 1) // PAYLOAD_CHUNK_SIZE
+    chunk_size = get_payload_chunk_size(payload_length)
+    return (payload_length + chunk_size - 1) // chunk_size
 ```
 
 #### New `get_payload_chunk_count`
@@ -336,8 +368,9 @@ def compute_payload_chunk(
     coefficients = compute_lagrange_coefficients(
         [int(known_index) for known_index in known_indices], int(index)
     )
+    chunk_size = len(known_chunks[0])
     chunk = b""
-    for offset in range(0, PAYLOAD_CHUNK_SIZE, PAYLOAD_CHUNK_SYMBOL_SIZE):
+    for offset in range(0, chunk_size, PAYLOAD_CHUNK_SYMBOL_SIZE):
         symbol = 0
         for i, known_chunk in enumerate(known_chunks):
             known_symbol = int.from_bytes(
@@ -345,7 +378,7 @@ def compute_payload_chunk(
             )
             symbol ^= gf16_multiply(coefficients[i], known_symbol)
         chunk += symbol.to_bytes(PAYLOAD_CHUNK_SYMBOL_SIZE, ENDIANNESS)
-    return PayloadChunkData(chunk)
+    return PayloadChunkData(data=chunk)
 ```
 
 #### New `compute_payload_chunks`
@@ -357,15 +390,17 @@ def compute_payload_chunks(payload_bytes: bytes) -> Sequence[PayloadChunkData]:
     bytes, and extend them with parity chunks. The code is systematic: the
     data chunks come first and hold the payload bytes verbatim.
     """
-    data_chunk_count = get_payload_data_chunk_count(Uint64(len(payload_bytes)))
-    chunk_count = get_payload_chunk_count(Uint64(len(payload_bytes)))
-    padding = b"\x00" * (data_chunk_count * PAYLOAD_CHUNK_SIZE - len(payload_bytes))
+    payload_length = Uint64(len(payload_bytes))
+    chunk_size = get_payload_chunk_size(payload_length)
+    data_chunk_count = get_payload_data_chunk_count(payload_length)
+    chunk_count = get_payload_chunk_count(payload_length)
+    padding = b"\x00" * (data_chunk_count * chunk_size - len(payload_bytes))
     padded_bytes = payload_bytes + padding
 
     data_chunks = []
     for i in range(data_chunk_count):
-        start = i * PAYLOAD_CHUNK_SIZE
-        data_chunks.append(PayloadChunkData(padded_bytes[start : start + PAYLOAD_CHUNK_SIZE]))
+        start = i * chunk_size
+        data_chunks.append(PayloadChunkData(data=padded_bytes[start : start + chunk_size]))
     data_indices = [PayloadChunkIndex(i) for i in range(data_chunk_count)]
 
     parity_chunks = []
@@ -394,9 +429,9 @@ def recover_payload_bytes(
     for i in range(data_chunk_count):
         index = PayloadChunkIndex(i)
         if index in chunks:
-            payload_bytes += chunks[index]
+            payload_bytes += bytes(chunks[index])
         else:
-            payload_bytes += compute_payload_chunk(known_chunks, known_indices, index)
+            payload_bytes += bytes(compute_payload_chunk(known_chunks, known_indices, index))
     return payload_bytes[:payload_length]
 ```
 
@@ -407,7 +442,7 @@ def compute_payload_chunks_root(chunks: Sequence[PayloadChunkData]) -> Root:
     """
     Return the commitment to ``chunks``: the root of the list of their hashes.
     """
-    return hash_tree_root(PayloadChunkHashes(data=[sha256(chunk) for chunk in chunks]))
+    return hash_tree_root(PayloadChunkHashes(data=[sha256(bytes(chunk)) for chunk in chunks]))
 ```
 
 #### New `get_execution_payload_contents`
@@ -485,7 +520,7 @@ def process_execution_payload_bid(
     # [New in EIP8142]
     # Verify that the committed payload can be disseminated as chunks
     assert bid.payload_length > 0
-    assert get_payload_chunk_count(bid.payload_length) <= MAX_PAYLOAD_CHUNKS
+    assert get_payload_chunk_size(bid.payload_length) <= MAX_PAYLOAD_CHUNK_SIZE
 
     # Verify that the bid is for the current slot
     assert bid.slot == state.slot

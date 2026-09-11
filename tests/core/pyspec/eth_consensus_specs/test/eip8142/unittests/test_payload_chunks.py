@@ -4,12 +4,18 @@ from eth_consensus_specs.test.context import (
     single_phase,
     spec_test,
     with_eip8142_and_later,
+    with_presets,
 )
+from eth_consensus_specs.test.helpers.constants import MINIMAL
 
 
 def _random_payload_bytes(spec, rng, data_chunk_count, short_by=1):
-    """Random bytes filling ``data_chunk_count`` chunks, the last one partially."""
-    length = data_chunk_count * spec.PAYLOAD_CHUNK_SIZE - short_by
+    """
+    Random bytes filling ``data_chunk_count`` chunks of the minimum size, the
+    last one partially. ``data_chunk_count`` must not exceed the cap.
+    """
+    assert data_chunk_count <= spec.MAX_PAYLOAD_DATA_CHUNKS
+    length = data_chunk_count * spec.MIN_PAYLOAD_CHUNK_SIZE - short_by
     return bytes(rng.getrandbits(8) for _ in range(length))
 
 
@@ -66,15 +72,60 @@ def test_lagrange_coefficients_interpolate(spec):
 @with_eip8142_and_later
 @spec_test
 @single_phase
+def test_get_payload_chunk_size(spec):
+    cap = spec.MAX_PAYLOAD_DATA_CHUNKS
+    floor = spec.MIN_PAYLOAD_CHUNK_SIZE
+
+    # Below the cap, chunks stay at the floor and the count grows
+    for length in [1, floor, floor + 1, cap * floor]:
+        assert spec.get_payload_chunk_size(length) == floor
+        assert spec.get_payload_data_chunk_count(length) == (length + floor - 1) // floor
+    assert spec.get_payload_data_chunk_count(cap * floor) == cap
+
+    # Past the cap, the count stays at the cap and the chunks grow
+    for length in [cap * floor + 1, 2 * cap * floor, 3 * cap * floor + 7]:
+        chunk_size = spec.get_payload_chunk_size(length)
+        assert chunk_size > floor
+        assert chunk_size % spec.PAYLOAD_CHUNK_SYMBOL_SIZE == 0
+        assert spec.get_payload_data_chunk_count(length) == cap
+        assert cap * chunk_size >= length
+        assert cap * (chunk_size - spec.PAYLOAD_CHUNK_SYMBOL_SIZE) < length
+
+    # The extension doubles the count either way
+    assert spec.get_payload_chunk_count(floor) == 2
+    assert spec.get_payload_chunk_count(2 * cap * floor) == spec.MAX_PAYLOAD_CHUNKS
+
+
+@with_eip8142_and_later
+@with_presets([MINIMAL], reason="encoding a payload past the cap is slow in pure Python")
+@spec_test
+@single_phase
+def test_compute_payload_chunks_grown_chunks(spec):
+    """Past the cap, the code runs on larger chunks and still recovers."""
+    rng = random.Random(9)
+    cap = spec.MAX_PAYLOAD_DATA_CHUNKS
+    length = cap * spec.MIN_PAYLOAD_CHUNK_SIZE + 5
+    payload_bytes = bytes(rng.getrandbits(8) for _ in range(length))
+    chunks = spec.compute_payload_chunks(payload_bytes)
+
+    assert len(chunks) == spec.MAX_PAYLOAD_CHUNKS
+    assert all(len(chunk) == spec.get_payload_chunk_size(length) for chunk in chunks)
+    known = _chunks_by_index(spec, chunks, rng.sample(range(len(chunks)), cap))
+    assert spec.recover_payload_bytes(known, spec.Uint64(length)) == payload_bytes
+
+
+@with_eip8142_and_later
+@spec_test
+@single_phase
 def test_compute_payload_chunks_is_systematic(spec):
     rng = random.Random(1)
     payload_bytes = _random_payload_bytes(spec, rng, data_chunk_count=3)
     chunks = spec.compute_payload_chunks(payload_bytes)
 
     assert len(chunks) == spec.get_payload_chunk_count(len(payload_bytes))
-    assert b"".join(chunks[:3]).startswith(payload_bytes)
+    assert b"".join(bytes(chunk) for chunk in chunks[:3]).startswith(payload_bytes)
     # The last data chunk is zero padded
-    assert b"".join(chunks[:3])[len(payload_bytes) :] == b"\x00"
+    assert b"".join(bytes(chunk) for chunk in chunks[:3])[len(payload_bytes) :] == b"\x00"
 
 
 @with_eip8142_and_later
@@ -130,7 +181,7 @@ def test_payload_chunks_root_detects_corruption(spec):
     root = spec.compute_payload_chunks_root(chunks)
 
     corrupted = list(chunks)
-    corrupted[-1] = spec.PayloadChunkData(bytes(spec.PAYLOAD_CHUNK_SIZE))
+    corrupted[-1] = spec.PayloadChunkData(data=bytes(len(chunks[-1])))
     assert spec.compute_payload_chunks_root(corrupted) != root
 
     # The root commits to the chunk count as well

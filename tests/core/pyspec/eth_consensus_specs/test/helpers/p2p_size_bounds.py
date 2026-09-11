@@ -78,6 +78,12 @@ def build_max_size_signed_inclusion_list(spec):
     return spec.SignedInclusionList(message=inclusion_list, signature=spec.BLSSignature())
 
 
+def build_max_size_execution_payload_chunk(spec):
+    return spec.ExecutionPayloadChunk(
+        data=spec.PayloadChunkData(data=bytes(spec.MAX_PAYLOAD_CHUNK_SIZE)),
+    )
+
+
 def build_max_size_signed_execution_proof_envelope(spec):
     return spec.SignedExecutionProofEnvelope(
         message=spec.ExecutionProofEnvelope(
@@ -109,6 +115,10 @@ def get_max_signed_execution_payload_bid_size(spec):
 
 def get_max_signed_inclusion_list_size(spec):
     return spec.MAX_SIGNED_INCLUSION_LIST_SIZE
+
+
+def get_max_execution_payload_chunk_size(spec):
+    return spec.MAX_EXECUTION_PAYLOAD_CHUNK_SIZE
 
 
 def get_max_signed_execution_proof_envelope_size(spec):

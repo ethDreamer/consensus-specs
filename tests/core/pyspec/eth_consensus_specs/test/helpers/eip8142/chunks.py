@@ -28,8 +28,8 @@ def build_inconsistent_chunks(spec, block, payload, execution_requests=None):
     """
     contents = get_execution_payload_contents(spec, payload, execution_requests)
     chunks = list(spec.compute_payload_chunks(spec.ssz_serialize(contents)))
-    chunks[-1] = spec.PayloadChunkData(b"\x42" * spec.PAYLOAD_CHUNK_SIZE)
-    chunk_hashes = spec.PayloadChunkHashes(data=[spec.sha256(chunk) for chunk in chunks])
+    chunks[-1] = spec.PayloadChunkData(data=b"\x42" * len(chunks[-1]))
+    chunk_hashes = spec.PayloadChunkHashes(data=[spec.sha256(bytes(chunk)) for chunk in chunks])
     root = spec.hash_tree_root(chunk_hashes)
     block_root = spec.hash_tree_root(block)
     execution_payload_chunks = [

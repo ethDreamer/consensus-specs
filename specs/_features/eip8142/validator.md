@@ -36,7 +36,7 @@ external bids and computes for self-builds.
   described in the [honest builder](./builder.md) specification, using the
   `ExecutionPayload` and `ExecutionRequests` the proposer constructed.
 - The `bid.payload_length` MUST satisfy
-  `get_payload_chunk_count(bid.payload_length) <= MAX_PAYLOAD_CHUNKS`.
+  `get_payload_chunk_size(bid.payload_length) <= MAX_PAYLOAD_CHUNK_SIZE`.
 
 #### Publishing self-built payloads
 

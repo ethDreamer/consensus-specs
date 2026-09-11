@@ -328,6 +328,25 @@ def test_gossip_execution_payload_chunk__reject_index_out_of_range(spec, state):
 
 @with_eip8142_and_later
 @spec_state_test
+def test_gossip_execution_payload_chunk__reject_wrong_data_size(spec, state):
+    """A chunk whose data is not the size the bid's payload length implies is rejected."""
+    store, _block_root, _envelope, chunks, seen, time_ms, messages = yield from setup_chunk_test(
+        spec, state
+    )
+    chunk = chunks[0].copy()
+    chunk.data = spec.PayloadChunkData(data=bytes(chunk.data) + b"\x00")
+    yield get_filename(chunk), chunk
+
+    time_ms += 10
+    run_chunk(
+        spec, seen, store, chunk, time_ms, messages, "reject", "chunk's data has the wrong size"
+    )
+
+    yield "messages", "meta", messages
+
+
+@with_eip8142_and_later
+@spec_state_test
 def test_gossip_execution_payload_chunk__reject_corrupted_data(spec, state):
     """A chunk whose data does not match its proof is rejected."""
     store, _block_root, _envelope, chunks, seen, time_ms, messages = yield from setup_chunk_test(
@@ -336,7 +355,7 @@ def test_gossip_execution_payload_chunk__reject_corrupted_data(spec, state):
     chunk = chunks[-1].copy()
     data = bytearray(chunk.data)
     data[0] ^= 0x01
-    chunk.data = spec.PayloadChunkData(bytes(data))
+    chunk.data = spec.PayloadChunkData(data=bytes(data))
     yield get_filename(chunk), chunk
 
     time_ms += 10

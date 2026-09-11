@@ -31,7 +31,7 @@ where `payload` and `execution_requests` are those returned by
     `compute_payload_chunks_root(compute_payload_chunks(payload_bytes))`.
 15. Set `bid.payload_length` to `len(payload_bytes)`. The builder **MUST**
     construct a payload for which
-    `get_payload_chunk_count(bid.payload_length) <= MAX_PAYLOAD_CHUNKS`.
+    `get_payload_chunk_size(bid.payload_length) <= MAX_PAYLOAD_CHUNK_SIZE`.
 
 ### Constructing the `ExecutionPayloadChunk`s
 
@@ -48,7 +48,7 @@ def get_execution_payload_chunks(
     block: BeaconBlock, contents: ExecutionPayloadContents
 ) -> Sequence[ExecutionPayloadChunk]:
     chunks = compute_payload_chunks(ssz_serialize(contents))
-    chunk_hashes = PayloadChunkHashes(data=[sha256(chunk) for chunk in chunks])
+    chunk_hashes = PayloadChunkHashes(data=[sha256(bytes(chunk)) for chunk in chunks])
     return [
         ExecutionPayloadChunk(
             beacon_block_root=hash_tree_root(block),
