@@ -27,6 +27,9 @@
     - [New `gf16_inverse`](#new-gf16_inverse)
     - [New `compute_lagrange_coefficients`](#new-compute_lagrange_coefficients)
   - [Misc](#misc)
+    - [New `get_payload_chunk_point`](#new-get_payload_chunk_point)
+    - [New `get_payload_chunk_block_size`](#new-get_payload_chunk_block_size)
+    - [New `get_payload_chunk_position`](#new-get_payload_chunk_position)
     - [New `get_payload_chunk_size`](#new-get_payload_chunk_size)
     - [New `get_payload_data_chunk_count`](#new-get_payload_data_chunk_count)
     - [New `get_payload_chunk_count`](#new-get_payload_chunk_count)
@@ -104,11 +107,19 @@ class PayloadChunkHashes(List[Bytes32]):
 
 ### Erasure coding
 
-| Name                             | Value             | Description                                                  |
-| -------------------------------- | ----------------- | ------------------------------------------------------------ |
-| `PAYLOAD_CHUNK_FIELD_MODULUS`    | `Uint64(0x1100B)` | Primitive polynomial `x^16 + x^12 + x^3 + x + 1` of GF(2^16) |
-| `PAYLOAD_CHUNK_SYMBOL_SIZE`      | `Uint64(2)`       | Bytes per GF(2^16) symbol                                    |
-| `PAYLOAD_CHUNK_EXTENSION_FACTOR` | `Uint64(2)`       | Total chunks per data chunk                                  |
+| Name                             | Value                                                                                                                              | Description                                                   |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `PAYLOAD_CHUNK_FIELD_MODULUS`    | `Uint64(0x1002D)`                                                                                                                  | Primitive polynomial `x^16 + x^5 + x^3 + x^2 + 1` of GF(2^16) |
+| `PAYLOAD_CHUNK_FIELD_BASIS`      | `[0x0001, 0xACCA, 0x3C0E, 0x163E, 0xC582, 0xED2E, 0x914C, 0x4012, 0x6C98, 0x10D8, 0x6A72, 0xB900, 0xFDB8, 0xFB34, 0xFF38, 0x991E]` | Cantor basis of GF(2^16) spanning the evaluation points       |
+| `PAYLOAD_CHUNK_SYMBOL_SIZE`      | `Uint64(2)`                                                                                                                        | Bytes per GF(2^16) symbol                                     |
+| `PAYLOAD_CHUNK_EXTENSION_FACTOR` | `Uint64(2)`                                                                                                                        | Total chunks per data chunk                                   |
+
+*Note*: `PAYLOAD_CHUNK_FIELD_MODULUS` is the smallest primitive polynomial of
+degree 16. `PAYLOAD_CHUNK_FIELD_BASIS` is determined by the modulus: its first
+element is `1`, and each later element is the even one of the two roots of
+`x^2 + x = c` where `c` is the element before it, the roots differing by `1`.
+Elements of GF(2^16) are represented as integers whose bits are the coefficients
+of a polynomial over GF(2), and symbols are their little-endian bytes.
 
 ### Execution payload chunks
 
@@ -302,6 +313,49 @@ def compute_lagrange_coefficients(points: Sequence[int], target: int) -> Sequenc
 
 ### Misc
 
+#### New `get_payload_chunk_point`
+
+```python
+def get_payload_chunk_point(position: Uint64) -> int:
+    """
+    Return the evaluation point at ``position``: the sum of the elements of
+    ``PAYLOAD_CHUNK_FIELD_BASIS`` selected by the bits of ``position``. The
+    points at positions below a power of two form a subspace of GF(2^16),
+    and the points at the next as many positions form its coset.
+    """
+    point = 0
+    for bit, basis_element in enumerate(PAYLOAD_CHUNK_FIELD_BASIS):
+        if (position >> bit) & 1:
+            point ^= basis_element
+    return point
+```
+
+#### New `get_payload_chunk_block_size`
+
+```python
+def get_payload_chunk_block_size(data_chunk_count: Uint64) -> Uint64:
+    """
+    Return the number of positions the data chunks are laid out over: the
+    smallest power of two that is at least ``data_chunk_count``.
+    """
+    return Uint64(2 ** ceillog2(data_chunk_count))
+```
+
+#### New `get_payload_chunk_position`
+
+```python
+def get_payload_chunk_position(index: PayloadChunkIndex, data_chunk_count: Uint64) -> Uint64:
+    """
+    Return the position of the evaluation point of the chunk at ``index``.
+    Data chunks take the positions from the block size upwards, and parity
+    chunks the positions from zero upwards.
+    """
+    block_size = get_payload_chunk_block_size(data_chunk_count)
+    if index < data_chunk_count:
+        return block_size + index
+    return index - data_chunk_count
+```
+
 #### New `get_payload_chunk_size`
 
 ```python
@@ -349,32 +403,53 @@ def get_payload_chunk_count(payload_length: Uint64) -> Uint64:
 
 #### New `compute_payload_chunk`
 
-Every chunk of a payload is a codeword of the same Reed-Solomon code. For each
-symbol position, the symbols of the chunks are the evaluations at the chunk
-indices of a single polynomial over GF(2^16) whose degree is less than the
-number of data chunks. Any such number of chunks therefore determines every
-other chunk, whether it is a data chunk or a parity chunk.
+For each symbol position, the symbols of the chunks of a payload are the
+evaluations of a single polynomial over GF(2^16) at the chunks' points. With
+`block_size` the block size of the data chunk count, the polynomial has degree
+below `block_size`. It is determined by the data chunks together with zero
+chunks at the positions left in the block, so any `block_size` evaluations
+determine every other one, the zero chunks always being among the known ones.
+
+*Note*: The data chunks lie on a coset of the subspace spanned by the first
+`log2(block_size)` basis elements and the parity chunks on the subspace itself,
+so implementations may evaluate and interpolate with additive fast Fourier
+transforms over the Cantor basis. Implementations that represent field elements
+by their coordinates in `PAYLOAD_CHUNK_FIELD_BASIS`, as such transforms do,
+translate every symbol with a lookup table each way; the chunks and their
+commitment are always over the representation defined here.
 
 ```python
 def compute_payload_chunk(
-    known_chunks: Sequence[PayloadChunkData],
-    known_indices: Sequence[PayloadChunkIndex],
+    known_chunks: Dict[PayloadChunkIndex, PayloadChunkData],
+    data_chunk_count: Uint64,
     index: PayloadChunkIndex,
 ) -> PayloadChunkData:
     """
-    Compute the chunk at ``index`` from the ``known_chunks`` located at
-    ``known_indices``, whose count must equal the number of data chunks.
+    Compute the chunk at ``index`` from ``known_chunks``, which must hold
+    exactly ``data_chunk_count`` chunks.
     """
-    coefficients = compute_lagrange_coefficients(
-        [int(known_index) for known_index in known_indices], int(index)
-    )
-    chunk_size = len(known_chunks[0])
+    assert len(known_chunks) == data_chunk_count
+    block_size = get_payload_chunk_block_size(data_chunk_count)
+
+    # The known evaluations are the known chunks and the zero chunks in the block
+    known_indices = sorted(known_chunks.keys())
+    points = [
+        get_payload_chunk_point(get_payload_chunk_position(known_index, data_chunk_count))
+        for known_index in known_indices
+    ]
+    for position in range(block_size + data_chunk_count, 2 * block_size):
+        points.append(get_payload_chunk_point(Uint64(position)))
+    target = get_payload_chunk_point(get_payload_chunk_position(index, data_chunk_count))
+    # Zero chunks contribute nothing, so only the coefficients of the known chunks are used
+    coefficients = compute_lagrange_coefficients(points, target)
+
+    chunk_size = len(known_chunks[known_indices[0]])
     chunk = b""
     for offset in range(0, chunk_size, PAYLOAD_CHUNK_SYMBOL_SIZE):
         symbol = 0
-        for i, known_chunk in enumerate(known_chunks):
+        for i, known_index in enumerate(known_indices):
             known_symbol = int.from_bytes(
-                known_chunk[offset : offset + PAYLOAD_CHUNK_SYMBOL_SIZE], ENDIANNESS
+                known_chunks[known_index][offset : offset + PAYLOAD_CHUNK_SYMBOL_SIZE], ENDIANNESS
             )
             symbol ^= gf16_multiply(coefficients[i], known_symbol)
         chunk += symbol.to_bytes(PAYLOAD_CHUNK_SYMBOL_SIZE, ENDIANNESS)
@@ -397,16 +472,17 @@ def compute_payload_chunks(payload_bytes: bytes) -> Sequence[PayloadChunkData]:
     padding = b"\x00" * (data_chunk_count * chunk_size - len(payload_bytes))
     padded_bytes = payload_bytes + padding
 
-    data_chunks = []
+    data_chunks = {}
     for i in range(data_chunk_count):
         start = i * chunk_size
-        data_chunks.append(PayloadChunkData(data=padded_bytes[start : start + chunk_size]))
-    data_indices = [PayloadChunkIndex(i) for i in range(data_chunk_count)]
+        data_chunks[PayloadChunkIndex(i)] = PayloadChunkData(
+            data=padded_bytes[start : start + chunk_size]
+        )
 
-    parity_chunks = []
+    chunks = [data_chunks[PayloadChunkIndex(i)] for i in range(data_chunk_count)]
     for i in range(data_chunk_count, chunk_count):
-        parity_chunks.append(compute_payload_chunk(data_chunks, data_indices, PayloadChunkIndex(i)))
-    return data_chunks + parity_chunks
+        chunks.append(compute_payload_chunk(data_chunks, data_chunk_count, PayloadChunkIndex(i)))
+    return chunks
 ```
 
 #### New `recover_payload_bytes`
@@ -423,7 +499,7 @@ def recover_payload_bytes(
     assert len(chunks) >= data_chunk_count
 
     known_indices = sorted(chunks.keys())[:data_chunk_count]
-    known_chunks = [chunks[index] for index in known_indices]
+    known_chunks = {index: chunks[index] for index in known_indices}
 
     payload_bytes = b""
     for i in range(data_chunk_count):
@@ -431,7 +507,7 @@ def recover_payload_bytes(
         if index in chunks:
             payload_bytes += bytes(chunks[index])
         else:
-            payload_bytes += bytes(compute_payload_chunk(known_chunks, known_indices, index))
+            payload_bytes += bytes(compute_payload_chunk(known_chunks, data_chunk_count, index))
     return payload_bytes[:payload_length]
 ```
 

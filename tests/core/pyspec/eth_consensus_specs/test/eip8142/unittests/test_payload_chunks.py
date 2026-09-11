@@ -1,4 +1,7 @@
+import json
 import random
+from itertools import pairwise
+from pathlib import Path
 
 from eth_consensus_specs.test.context import (
     single_phase,
@@ -38,6 +41,96 @@ def test_gf16_arithmetic(spec):
         assert spec.gf16_multiply(a, spec.gf16_inverse(a)) == 1
         assert spec.gf16_multiply(a, b) < 2**16
     assert spec.gf16_multiply(0, 12345) == 0
+
+
+@with_eip8142_and_later
+@spec_test
+@single_phase
+def test_payload_chunk_field_basis(spec):
+    """
+    The basis follows its rule: it starts at one, and each element is the even
+    root of ``x^2 + x = previous``.
+    """
+    basis = spec.PAYLOAD_CHUNK_FIELD_BASIS
+    assert len(basis) == 16
+    assert basis[0] == 1
+    for previous, element in pairwise(basis):
+        assert element % 2 == 0
+        assert spec.gf16_multiply(element, element) ^ element == previous
+
+
+@with_eip8142_and_later
+@spec_test
+@single_phase
+def test_payload_chunk_points_form_subspaces(spec):
+    """
+    The points at positions below a power of two are closed under addition,
+    and the next as many positions are a coset of them.
+    """
+    for log_size in range(1, 5):
+        size = 2**log_size
+        subspace = {spec.get_payload_chunk_point(spec.Uint64(p)) for p in range(size)}
+        assert len(subspace) == size
+        assert all(a ^ b in subspace for a in subspace for b in subspace)
+        coset = {spec.get_payload_chunk_point(spec.Uint64(size + p)) for p in range(size)}
+        assert len(coset) == size
+        assert not subspace & coset
+        offset = spec.get_payload_chunk_point(spec.Uint64(size))
+        assert {point ^ offset for point in subspace} == coset
+
+
+def _crate_symbols(shard):
+    """
+    Symbols as reed-solomon-simd pairs the bytes of a shard: per 64-byte
+    block, the low bytes then the high bytes, and likewise for the tail.
+    """
+    symbols = []
+    full = len(shard) // 64 * 64
+    for block in range(0, full, 64):
+        for i in range(32):
+            symbols.append(shard[block + i] | shard[block + 32 + i] << 8)
+    tail = shard[full:]
+    half = len(tail) // 2
+    for i in range(half):
+        symbols.append(tail[i] | tail[half + i] << 8)
+    return symbols
+
+
+def _crate_shard_to_chunk(spec, shard):
+    """
+    Translate a crate shard into a chunk: its symbols are coordinates in
+    the Cantor basis, the specification's are polynomial-basis elements.
+    """
+    chunk = b""
+    for coordinates in _crate_symbols(shard):
+        element = spec.get_payload_chunk_point(spec.Uint64(coordinates))
+        chunk += element.to_bytes(spec.PAYLOAD_CHUNK_SYMBOL_SIZE, spec.ENDIANNESS)
+    return spec.PayloadChunkData(data=chunk)
+
+
+@with_eip8142_and_later
+@spec_test
+@single_phase
+def test_reed_solomon_simd_vectors(spec):
+    """
+    The specification's code reproduces the parity chunks computed by the
+    reed-solomon-simd crate, see ``helpers/eip8142/reed_solomon_simd``.
+    """
+    vectors_path = (
+        Path(__file__).parents[2] / "helpers" / "eip8142" / "reed_solomon_simd" / "vectors.json"
+    )
+    vectors = json.loads(vectors_path.read_text())
+    assert len(vectors) >= 10
+    for case in vectors:
+        data_chunk_count = spec.Uint64(case["original_count"])
+        data_chunks = {
+            spec.PayloadChunkIndex(i): _crate_shard_to_chunk(spec, bytes.fromhex(shard))
+            for i, shard in enumerate(case["original"])
+        }
+        for i, shard in enumerate(case["recovery"]):
+            expected = _crate_shard_to_chunk(spec, bytes.fromhex(shard))
+            index = spec.PayloadChunkIndex(data_chunk_count + i)
+            assert spec.compute_payload_chunk(data_chunks, data_chunk_count, index) == expected
 
 
 @with_eip8142_and_later
