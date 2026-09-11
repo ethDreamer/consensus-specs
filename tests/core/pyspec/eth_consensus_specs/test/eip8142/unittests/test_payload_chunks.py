@@ -79,6 +79,28 @@ def test_payload_chunk_points_form_subspaces(spec):
         assert {point ^ offset for point in subspace} == coset
 
 
+@with_eip8142_and_later
+@spec_test
+@single_phase
+def test_payload_chunk_positions_are_distinct(spec):
+    """
+    Every chunk of a payload, data or parity, has its own position, and the
+    zero chunks fill the rest of the block.
+    """
+    for data_chunk_count in range(1, spec.MAX_PAYLOAD_DATA_CHUNKS + 1):
+        data_chunk_count = spec.Uint64(data_chunk_count)
+        chunk_count = data_chunk_count * spec.PAYLOAD_CHUNK_EXTENSION_FACTOR
+        block_size = spec.get_payload_chunk_block_size(data_chunk_count)
+        positions = {
+            spec.get_payload_chunk_position(spec.PayloadChunkIndex(index), data_chunk_count)
+            for index in range(chunk_count)
+        }
+        assert len(positions) == chunk_count
+        zero_positions = set(range(block_size + data_chunk_count, 2 * block_size))
+        assert not positions & zero_positions
+        assert positions | zero_positions <= set(range(2 * block_size))
+
+
 def _crate_symbols(shard):
     """
     Symbols as reed-solomon-simd pairs the bytes of a shard: per 64-byte

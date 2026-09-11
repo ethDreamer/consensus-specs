@@ -278,6 +278,7 @@ def gf16_inverse(a: int) -> int:
     Return the multiplicative inverse of the non-zero GF(2^16) element ``a``,
     which is ``a`` raised to the power ``2**16 - 2``.
     """
+    assert a != 0
     result = 1
     base = a
     exponent = 2**16 - 2
@@ -336,9 +337,12 @@ def get_payload_chunk_point(position: Uint64) -> int:
 def get_payload_chunk_block_size(data_chunk_count: Uint64) -> Uint64:
     """
     Return the number of positions the data chunks are laid out over: the
-    smallest power of two that is at least ``data_chunk_count``.
+    smallest power of two that is at least ``data_chunk_count`` and at
+    least the parity chunk count, so that no parity chunk shares a
+    position with a data chunk.
     """
-    return Uint64(2 ** ceillog2(data_chunk_count))
+    parity_chunk_count = data_chunk_count * (PAYLOAD_CHUNK_EXTENSION_FACTOR - 1)
+    return Uint64(2 ** ceillog2(max(data_chunk_count, parity_chunk_count)))
 ```
 
 #### New `get_payload_chunk_position`
