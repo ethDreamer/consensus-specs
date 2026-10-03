@@ -242,7 +242,7 @@ def get_proposer_head(store: Store, slot: Slot) -> Root:
         for record in votes
         if get_goldfish_resolution_time_ms(store, record) < TIME_MS_INFINITY
     ]
-    return get_head_with_votes(store, votes, support_votes)
+    return get_head_with_votes(store, Slot(slot - 1), votes, support_votes)
 ```
 
 2. Includes every previous-slot Goldfish vote it holds, aggregated by
@@ -294,11 +294,10 @@ def get_goldfish_vote_head(store: Store, slot: Slot) -> Root:
     for block in store.blocks.values():
         if block.slot != slot:
             continue
-        parent_state = store.block_states[block.parent_root]
         for included in block.body.goldfish_votes:
             if included.aggregate.data.slot + 1 != slot:
                 continue
-            committee = get_goldfish_committee(parent_state, included.aggregate.data.slot)
+            committee = get_goldfish_committee_for(store, included.aggregate.data.slot)
             for i in range(len(committee)):
                 if not included.aggregate.aggregation_bits[i]:
                     continue
@@ -326,7 +325,7 @@ def get_goldfish_vote_head(store: Store, slot: Slot) -> Root:
                 view.append(root)
                 break
     tree_roots = get_filtered_block_tree_from(store, view)
-    return get_head_in_tree(store, tree_roots, votes, support_votes)
+    return get_head_in_tree(store, tree_roots, Slot(slot - 1), votes, support_votes)
 ```
 
 The validator signs `GoldfishVoteData(slot=slot, beacon_block_root=head)` with
@@ -390,3 +389,21 @@ member bits. Under synchrony honest validators converge on few classes; the two
 components aggregate independently, so divergence in one does not fragment the
 other. Aggregator selection follows the inherited sync-committee aggregator
 pattern and is not further specified here.
+
+For Goldfish votes, a validator occupying `k` committee seats broadcasts a
+single `GoldfishVote`; the aggregator sets the validator's `k` seat bits and
+adds the one received signature `k` times to the aggregate, so that verification
+against the `k` repeated pubkeys succeeds. This follows the payload timeliness
+committee's duplicate-index convention.
+
+*Note*: No proved invariant couples a validator's two attestation components:
+the nesting of the three tips is premise-free, accountable safety and the leak
+read only the finality component, and the delivery premises of the verified
+model cover wire broadcast and relay, not block carriage. A block may therefore
+count a validator's finality component while its stabilization component is
+omitted. Block carriage of stabilization rows remains the recovery backstop for
+refilling pools, so when including a round's finality aggregates under space
+pressure, the proposer SHOULD also include that round's stabilization aggregates
+when space permits. This is guidance, not a validity condition: linking the two
+would reintroduce the fragmentation coupling that independent aggregation exists
+to break.

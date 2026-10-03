@@ -6,7 +6,6 @@
 
 - [Introduction](#introduction)
 - [Constants](#constants)
-  - [Misc](#misc)
   - [Participation flag indices](#participation-flag-indices)
   - [Participation flag weights](#participation-flag-weights)
   - [Domain types](#domain-types)
@@ -20,6 +19,7 @@
   - [New `GoldfishCommitteeBits`](#new-goldfishcommitteebits)
   - [New `RoundSubnetBits`](#new-roundsubnetbits)
   - [New `HeightParticipation`](#new-heightparticipation)
+  - [New `GoldfishCommittee`](#new-goldfishcommittee)
   - [New `GoldfishAggregates`](#new-goldfishaggregates)
   - [New `StabilizationAggregates`](#new-stabilizationaggregates)
   - [New `FinalityAggregates`](#new-finalityaggregates)
@@ -58,9 +58,10 @@
     - [New `get_height_participant_indices`](#new-get_height_participant_indices)
     - [New `get_height_quorum_weight`](#new-get_height_quorum_weight)
     - [New `get_goldfish_committee`](#new-get_goldfish_committee)
+    - [New `get_goldfish_committee_at`](#new-get_goldfish_committee_at)
     - [New `get_round_subnet_members`](#new-get_round_subnet_members)
     - [New `get_round_base_reward`](#new-get_round_base_reward)
-    - [New `get_goldfish_vote_reward`](#new-get_goldfish_vote_reward)
+    - [New `get_goldfish_seat_reward`](#new-get_goldfish_seat_reward)
   - [Beacon state mutators](#beacon-state-mutators)
     - [New `advance_height`](#new-advance_height)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
@@ -74,6 +75,7 @@
     - [New `process_height_events`](#new-process_height_events)
   - [Epoch processing](#epoch-processing)
     - [Modified `process_epoch`](#modified-process_epoch)
+    - [New `process_goldfish_committee_update`](#new-process_goldfish_committee_update)
     - [New `is_waiting_on_timeout_delay`](#new-is_waiting_on_timeout_delay)
     - [New `get_leak_identified_indices`](#new-get_leak_identified_indices)
     - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
@@ -103,12 +105,6 @@ them), with cross-set safety resting on weak subjectivity as today.
 *Note*: This specification is built upon [Heze](../../heze/beacon-chain.md).
 
 ## Constants
-
-### Misc
-
-| Name               | Value               |
-| ------------------ | ------------------- |
-| `MAX_RANDOM_VALUE` | `Uint64(2**16 - 1)` |
 
 ### Participation flag indices
 
@@ -164,10 +160,27 @@ per-validator signing frequency.
 
 ### Committee parameters
 
-*Note*: Goldfish counts committee members rather than stake, so the committee
-must be sampled with stake weighting for an honest stake majority to imply an
-honest committee majority. The verified model takes the honest committee
-majority as a premise (`HonestCommittees`) and does not model the election.
+*Note*: Goldfish counts committee seats rather than stake, so seats are
+allocated by balance-weighted sampling with replacement: one validator may
+occupy several seats, following the payload timeliness committee's precedent.
+The sampler walks a shuffled candidate sequence cyclically, accepting each visit
+of a validator independently with probability
+`effective_balance / MAX_EFFECTIVE_BALANCE_ELECTRA`, and stops at
+`GOLDFISH_COMMITTEE_SIZE` seats. Every full cycle visits each active validator
+exactly once, and acceptance is exactly proportional to effective balance per
+visit, so any deviation of seat shares from stake shares comes from the single
+stopped boundary cycle and is bounded by one visit per validator. Seat shares
+are therefore *not exactly* stake-proportional: the boundary slightly favors
+higher-balance validators. Simulation at mainnet parameters over adversarial
+balance splits bounds the deviation at about 0.1% relative per balance class,
+with seat-count concentration at least as good as independent stake-proportional
+sampling; at the minimal preset's scale the deviation is on the order of a few
+percent, which is acceptable for testing only. The security property consumed by
+the protocol is that an honest majority of stake yields an honest majority of
+committee *seats* with high probability. The verified model takes the honest
+committee majority by count as a premise (`HonestCommittees`) and does not model
+the election; re-binding the model's committee membership to seat granularity is
+future verification work.
 
 | Name                      | Value                      |
 | ------------------------- | -------------------------- |
@@ -231,6 +244,16 @@ class HeightParticipation(ProgressiveList[ParticipationFlags]):
     """
     The height participation flags of all validators at the current
     height.
+    """
+```
+
+### New `GoldfishCommittee`
+
+```python
+class GoldfishCommittee(ProgressiveList[ValidatorIndex]):
+    """
+    A Goldfish committee: seat positions in order, with possible
+    duplicate validator indices.
     """
 ```
 
@@ -478,7 +501,7 @@ delay), `nj` is `non_justifiable`, the three quorum bitmaps are
 ```python
 # [Modified in Trident]
 class BeaconState(ProgressiveContainer):
-    ACTIVE_FIELDS = active_fields(width=53)
+    ACTIVE_FIELDS = active_fields(width=54)
 
     genesis_time: Uint64
     genesis_validators_root: Root
@@ -526,6 +549,8 @@ class BeaconState(ProgressiveContainer):
     latest_execution_payload_bid: ExecutionPayloadBid
     payload_expected_withdrawals: Withdrawals
     ptc_window: PayloadTimelinessCommitteeWindow
+    # [New in Trident]
+    previous_goldfish_committee: GoldfishCommittee
     # [New in Trident]
     height: Height
     # [New in Trident]
@@ -674,40 +699,56 @@ majority implies an honest committee majority by count, which Goldfish requires.
 Acceptance sampling follows the proposer-selection pattern. A validator appears
 at most once.
 
+The committee depends on the seed and active set of the slot's epoch, which are
+reconstructible from any later state, and on the effective balances in force
+during that epoch, which are not: they are overwritten at the epoch transition.
+`get_goldfish_committee` therefore requires a state whose current epoch is the
+slot's epoch, and the one consumer that decodes across an epoch boundary — the
+first block of an epoch carrying the previous slot's votes — reads the snapshot
+taken by `process_goldfish_committee_update` instead, through
+`get_goldfish_committee_at`.
+
 ```python
 def get_goldfish_committee(state: BeaconState, slot: Slot) -> list[ValidatorIndex]:
     epoch = compute_epoch_at_slot(slot)
+    assert epoch == get_current_epoch(state)
     seed = sha256(get_seed(state, epoch, DOMAIN_GOLDFISH_VOTE) + uint_to_bytes(slot))
     indices = get_active_validator_indices(state, epoch)
-    total = Uint64(len(indices))
-    assert total > 0
-    size = min(GOLDFISH_COMMITTEE_SIZE, total)
-    committee: list[ValidatorIndex] = []
-    selected: set[ValidatorIndex] = set()
-    i = Uint64(0)
-    random_bytes = sha256(seed)
-    while len(committee) < size:
-        offset = i % 16 * 2
-        if offset == 0:
-            random_bytes = sha256(seed + uint_to_bytes(i // 16))
-        shuffled_index = compute_shuffled_index(i % total, total, seed)
-        candidate_index = indices[shuffled_index]
-        random_value = bytes_to_uint64(random_bytes[offset : offset + 2])
-        weight = state.validators[candidate_index].effective_balance * MAX_RANDOM_VALUE
-        threshold = MAX_EFFECTIVE_BALANCE_ELECTRA * random_value
-        if weight >= threshold and candidate_index not in selected:
-            committee.append(candidate_index)
-            selected.add(candidate_index)
-        i += 1
-    return committee
+    return list(
+        compute_balance_weighted_selection(
+            state, indices, seed, size=GOLDFISH_COMMITTEE_SIZE, shuffle_indices=True
+        )
+    )
+```
+
+#### New `get_goldfish_committee_at`
+
+```python
+def get_goldfish_committee_at(state: BeaconState, slot: Slot) -> list[ValidatorIndex]:
+    epoch = compute_epoch_at_slot(slot)
+    if epoch == get_current_epoch(state):
+        return get_goldfish_committee(state, slot)
+    # Only the last slot of the previous epoch is ever decoded
+    assert epoch + 1 == get_current_epoch(state)
+    assert (slot + 1) % SLOTS_PER_EPOCH == 0
+    return [ValidatorIndex(index) for index in state.previous_goldfish_committee]
 ```
 
 #### New `get_round_subnet_members`
 
+Subnet membership is anchored to the epoch of the round's opening slot, not the
+epoch in which an aggregate happens to be processed: an aggregate built near the
+end of the expiry window must decode to the same validators everywhere. The
+anchored active set is reconstructible from any later state, since the registry
+is append-only and activation and exit epochs describe past epochs faithfully.
+
 ```python
-def get_round_subnet_members(state: BeaconState, subnet_id: Uint64) -> list[ValidatorIndex]:
+def get_round_subnet_members(
+    state: BeaconState, round: Round, subnet_id: Uint64
+) -> list[ValidatorIndex]:
+    epoch = compute_epoch_at_slot(compute_round_opening_slot(round))
     members = []
-    for index in get_active_validator_indices(state, get_current_epoch(state)):
+    for index in get_active_validator_indices(state, epoch):
         if index % ROUND_SUBNET_COUNT == subnet_id:
             members.append(index)
     return members
@@ -723,18 +764,22 @@ def get_round_base_reward(state: BeaconState, index: ValidatorIndex) -> Gwei:
     return Gwei(get_base_reward(state, index) * SLOTS_PER_ROUND // SLOTS_PER_EPOCH)
 ```
 
-#### New `get_goldfish_vote_reward`
+#### New `get_goldfish_seat_reward`
 
-The reward for one included Goldfish vote, scaled by the expected committee duty
-frequency so that the expected per-epoch reward is the `GOLDFISH_VOTE_WEIGHT`
-share of the base reward.
+The reward for one included committee seat. Because seats are allocated
+approximately in proportion to effective balance, a flat per-seat amount makes a
+validator's expected Goldfish rewards linear in its stake: the
+`GOLDFISH_VOTE_WEIGHT` share of total per-epoch base rewards, divided over the
+epoch's seats. A per-seat reward proportional to the validator's own balance
+would instead scale rewards with the square of the balance, since selection
+probability already carries one factor.
 
 ```python
-def get_goldfish_vote_reward(state: BeaconState, index: ValidatorIndex) -> Gwei:
-    active_count = len(get_active_validator_indices(state, get_current_epoch(state)))
-    reward_per_epoch = get_base_reward(state, index) * GOLDFISH_VOTE_WEIGHT // WEIGHT_DENOMINATOR
-    duties_per_epoch = GOLDFISH_COMMITTEE_SIZE * SLOTS_PER_EPOCH
-    return Gwei(reward_per_epoch * active_count // duties_per_epoch)
+def get_goldfish_seat_reward(state: BeaconState) -> Gwei:
+    total_increments = get_total_active_balance(state) // EFFECTIVE_BALANCE_INCREMENT
+    total_base_rewards = Gwei(total_increments * get_base_reward_per_increment(state))
+    goldfish_share = Gwei(total_base_rewards * GOLDFISH_VOTE_WEIGHT // WEIGHT_DENOMINATOR)
+    return Gwei(goldfish_share // (GOLDFISH_COMMITTEE_SIZE * SLOTS_PER_EPOCH))
 ```
 
 ### Beacon state mutators
@@ -835,12 +880,19 @@ Included Goldfish votes have no effect on the finality state; they are processed
 for inclusion rewards and validated so that the fork choice can read them from
 blocks.
 
+A validator occupying several seats appears at several committee positions; a
+set bit at each position contributes the validator's pubkey once more to the
+aggregate verification and earns one more seat reward. A validator broadcasts a
+single signature; the aggregator includes that signature once per set seat bit,
+so the aggregate verifies against the repeated pubkeys, as the payload
+timeliness committee's indexed attestations do.
+
 ```python
 def process_goldfish_votes(state: BeaconState, included: IncludedGoldfishVotes) -> None:
     aggregate = included.aggregate
     data = aggregate.data
     assert data.slot + 1 == state.slot
-    committee = get_goldfish_committee(state, data.slot)
+    committee = get_goldfish_committee_at(state, data.slot)
     assert len(aggregate.aggregation_bits) == len(committee)
     assert len(included.support_bits) == len(committee)
     participants = [
@@ -851,17 +903,17 @@ def process_goldfish_votes(state: BeaconState, included: IncludedGoldfishVotes) 
     for i in range(len(committee)):
         if included.support_bits[i]:
             assert aggregate.aggregation_bits[i]
-    # Verify the aggregate signature
+    # Verify the aggregate signature, with repeated pubkeys for repeated seats
     pubkeys = [state.validators[index].pubkey for index in participants]
     domain = get_domain(state, DOMAIN_GOLDFISH_VOTE, compute_epoch_at_slot(data.slot))
     signing_root = compute_signing_root(data, domain)
     assert bls.FastAggregateVerify(pubkeys, signing_root, aggregate.signature)
-    # Reward the participants and the proposer
+    # Reward each included seat and the proposer
+    seat_reward = get_goldfish_seat_reward(state)
     proposer_reward_numerator = 0
     for index in participants:
-        reward = get_goldfish_vote_reward(state, index)
-        increase_balance(state, index, reward)
-        proposer_reward_numerator += reward * PROPOSER_WEIGHT
+        increase_balance(state, index, seat_reward)
+        proposer_reward_numerator += seat_reward * PROPOSER_WEIGHT
     proposer_reward = Gwei(proposer_reward_numerator // (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT))
     increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 ```
@@ -879,7 +931,7 @@ def process_stabilization_aggregate(
     data = aggregate.data
     assert data.round <= compute_round_at_slot(state.slot)
     assert aggregate.subnet_id < ROUND_SUBNET_COUNT
-    members = get_round_subnet_members(state, aggregate.subnet_id)
+    members = get_round_subnet_members(state, aggregate.data.round, aggregate.subnet_id)
     assert len(aggregate.aggregation_bits) == len(members)
     participants = [members[i] for i in range(len(members)) if aggregate.aggregation_bits[i]]
     assert len(participants) > 0
@@ -903,7 +955,7 @@ def process_finality_aggregate(state: BeaconState, aggregate: FinalityAggregate)
     data = aggregate.data
     assert data.round <= compute_round_at_slot(state.slot)
     assert aggregate.subnet_id < ROUND_SUBNET_COUNT
-    members = get_round_subnet_members(state, aggregate.subnet_id)
+    members = get_round_subnet_members(state, aggregate.data.round, aggregate.subnet_id)
     assert len(aggregate.aggregation_bits) == len(members)
     participants = [members[i] for i in range(len(members)) if aggregate.aggregation_bits[i]]
     assert len(participants) > 0
@@ -1042,6 +1094,8 @@ def process_epoch(state: BeaconState) -> None:
     process_pending_deposits(state)
     process_pending_consolidations(state)
     process_builder_pending_payments(state)
+    # [New in Trident]
+    process_goldfish_committee_update(state)
     process_effective_balance_updates(state)
     process_slashings_reset(state)
     process_randao_mixes_reset(state)
@@ -1050,6 +1104,25 @@ def process_epoch(state: BeaconState) -> None:
     process_sync_committee_updates(state)
     process_proposer_lookahead(state)
     process_ptc_window(state)
+```
+
+#### New `process_goldfish_committee_update`
+
+The snapshot MUST be taken before `process_effective_balance_updates`: the
+committee of the ending epoch's last slot is a function of the effective
+balances in force during that epoch, and this is the last point at which they
+are available. The snapshot serves the one decode that crosses the epoch
+boundary, the first block of the next epoch carrying the last slot's votes. This
+mirrors the payload timeliness committee's cached window, reduced to a single
+committee because Goldfish votes expire after one slot.
+
+```python
+def process_goldfish_committee_update(state: BeaconState) -> None:
+    committee = get_goldfish_committee(state, state.slot)
+    snapshot = GoldfishCommittee()
+    for index in committee:
+        snapshot.append(index)
+    state.previous_goldfish_committee = snapshot
 ```
 
 #### New `is_waiting_on_timeout_delay`
@@ -1075,11 +1148,31 @@ read per epoch. Three layers identify validators outside the quorum bitmaps
 while the corresponding counter is stalled; the identified set is their union,
 so a validator is counted once however many layers identify it.
 
-*Note*: The model states (but does not prove) a tightness target: whenever the
-chain is stalled, the identified weight is at least `W - q`, so leaking it
-restores a quorum. L1 fairness (an honest validator whose attestation is carried
-at its entry is never L1-charged) is proved; L2 fairness and fairness under
-censorship are open.
+*Note*: **This section is an unverified economic adaptation.** The model's
+ledger defines charges only; it attaches no penalties ("no charge changes
+weights or transitions"), and its raw charge conditions fire on every
+non-advancing block, healthy steady state included — so any deployable penalty
+translation necessarily adds activation conditions the model does not have. The
+adaptation here differs from the ledger as follows, each deviation charging
+*less*, to *fewer* validators, than the raw ledger:
+
+| Dimension   | Model ledger                                             | This adaptation                 |
+| ----------- | -------------------------------------------------------- | ------------------------------- |
+| Granularity | per block, scaled by the slot span                       | per epoch, unscaled             |
+| Layers      | three separate charge counters, union for identification | union into one inactivity score |
+| L1 trigger  | every block that does not advance the height             | height stalled for an epoch     |
+| L2 trigger  | every block that does not advance the counter            | counter stalled for an epoch    |
+| Waiting     | gates only the tightness statement                       | gates identification itself     |
+
+Of the model's leak properties, exactly one is proved: L1 fairness — an honest
+validator whose attestation is carried at its entry accrues no L1 charge. The
+tightness target (whenever the chain is stalled, the identified weight is at
+least `W - q`, so leaking it restores a quorum) is stated but not proved, and L2
+fairness and fairness under censorship are open. Collapsing the layers into one
+score lets the unproven L2 layers charge validators that the proven L1 fairness
+protects; keeping three per-validator charge counters and translating them into
+penalties separately is a flagged design option, deferred until the paper's
+leak-identification section is available.
 
 ```python
 def get_leak_identified_indices(state: BeaconState) -> set[ValidatorIndex]:

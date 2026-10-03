@@ -32,6 +32,7 @@
     - [New `get_filtered_block_tree_from`](#new-get_filtered_block_tree_from)
     - [New `get_filtered_block_tree`](#new-get_filtered_block_tree)
   - [Goldfish score and walk](#goldfish-score-and-walk)
+    - [New `get_goldfish_committee_for`](#new-get_goldfish_committee_for)
     - [New `get_goldfish_score`](#new-get_goldfish_score)
     - [New `count_goldfish_voters`](#new-count_goldfish_voters)
     - [New `get_children`](#new-get_children)
@@ -399,16 +400,41 @@ def get_filtered_block_tree(store: Store) -> list[Root]:
 
 ### Goldfish score and walk
 
+#### New `get_goldfish_committee_for`
+
+The committee of a vote slot, read from the fork-choice store. The FG-root state
+is advanced to the slot's epoch when it lags (the advance crosses the epoch
+transition, which writes the snapshot that `get_goldfish_committee_at` reads); a
+state already past the slot's epoch serves the snapshot directly. All scoring,
+decoding, and duty consumers in this document and the validator document read
+committees through this one accessor, so every honest node with the same FG root
+decodes the same committee.
+
+```python
+def get_goldfish_committee_for(store: Store, slot: Slot) -> list[ValidatorIndex]:
+    state = store.block_states[get_fg_root(store)]
+    target_epoch = compute_epoch_at_slot(slot)
+    if get_current_epoch(state) < target_epoch:
+        state = state.copy()
+        process_slots(state, compute_start_slot_at_epoch(target_epoch))
+    return get_goldfish_committee_at(state, slot)
+```
+
 #### New `get_goldfish_score`
 
-Equivocators count for every block and stay among the participants: discovering
-an equivocation cannot make a majority-eligible block ineligible, though it can
-make another block newly eligible. A non-equivocating validator counts once, in
-one subtree. The score counts committee members, not stake.
+Scores count committee *seats*. A validator's support, participation, and
+equivocation are per-validator facts that apply to every seat it occupies, so a
+validator occupying several seats contributes its full multiplicity, independent
+of which bits an aggregator happened to set. Equivocators count for every block
+and stay among the participants: discovering an equivocation cannot make a
+majority-eligible block ineligible, though it can make another block newly
+eligible. A non-equivocating validator's seats count once, in one subtree. The
+score counts seats, not stake.
 
 ```python
 def get_goldfish_score(
     store: Store,
+    committee: list[ValidatorIndex],
     votes: list[GoldfishVoteRecord],
     support_votes: list[GoldfishVoteRecord],
     block_root: Root,
@@ -432,14 +458,25 @@ def get_goldfish_score(
             continue
         if is_ancestor(store, block_root, record.head_root):
             supporters.add(record.validator_index)
-    return Uint64(len(equivocators) + len(supporters))
+    seats = 0
+    for index in committee:
+        if index in equivocators or index in supporters:
+            seats += 1
+    return Uint64(seats)
 ```
 
 #### New `count_goldfish_voters`
 
 ```python
-def count_goldfish_voters(votes: list[GoldfishVoteRecord]) -> Uint64:
-    return Uint64(len({record.validator_index for record in votes}))
+def count_goldfish_voters(
+    committee: list[ValidatorIndex], votes: list[GoldfishVoteRecord]
+) -> Uint64:
+    voters = {record.validator_index for record in votes}
+    seats = 0
+    for index in committee:
+        if index in voters:
+            seats += 1
+    return Uint64(seats)
 ```
 
 #### New `get_children`
@@ -462,17 +499,18 @@ def goldfish_fork_choice(
     store: Store,
     anchor_root: Root,
     tree_roots: list[Root],
+    committee: list[ValidatorIndex],
     votes: list[GoldfishVoteRecord],
     support_votes: list[GoldfishVoteRecord],
 ) -> Root:
-    voters_count = count_goldfish_voters(votes)
+    voters_count = count_goldfish_voters(committee, votes)
     current_slot = get_current_slot(store)
     head = anchor_root
     while True:
         eligible_children = []
         for child in get_children(store, tree_roots, head):
             parent_state = store.block_states[store.blocks[child].parent_root]
-            score = get_goldfish_score(store, votes, support_votes, child)
+            score = get_goldfish_score(store, committee, votes, support_votes, child)
             if (
                 parent_state.height + 1 < store.max_height
                 or 2 * score > voters_count
@@ -482,9 +520,9 @@ def goldfish_fork_choice(
         if len(eligible_children) == 0:
             return head
         best = eligible_children[0]
-        best_score = get_goldfish_score(store, votes, support_votes, best)
+        best_score = get_goldfish_score(store, committee, votes, support_votes, best)
         for child in eligible_children[1:]:
-            score = get_goldfish_score(store, votes, support_votes, child)
+            score = get_goldfish_score(store, committee, votes, support_votes, child)
             if (score, child) > (best_score, best):
                 best = child
                 best_score = score
@@ -754,11 +792,13 @@ def get_sg_root(store: Store) -> Root:
 def get_head_in_tree(
     store: Store,
     tree_roots: list[Root],
+    vote_slot: Slot,
     votes: list[GoldfishVoteRecord],
     support_votes: list[GoldfishVoteRecord],
 ) -> Root:
     anchor_root = get_sg_root(store)
-    return goldfish_fork_choice(store, anchor_root, tree_roots, votes, support_votes)
+    committee = get_goldfish_committee_for(store, vote_slot)
+    return goldfish_fork_choice(store, anchor_root, tree_roots, committee, votes, support_votes)
 ```
 
 #### New `get_head_with_votes`
@@ -766,11 +806,12 @@ def get_head_in_tree(
 ```python
 def get_head_with_votes(
     store: Store,
+    vote_slot: Slot,
     votes: list[GoldfishVoteRecord],
     support_votes: list[GoldfishVoteRecord],
 ) -> Root:
     tree_roots = get_filtered_block_tree(store)
-    return get_head_in_tree(store, tree_roots, votes, support_votes)
+    return get_head_in_tree(store, tree_roots, vote_slot, votes, support_votes)
 ```
 
 #### New `get_head`
@@ -781,13 +822,14 @@ see the validator document.
 
 ```python
 def get_head(store: Store) -> Root:
-    votes = store.goldfish_votes.get(get_current_slot(store), [])
+    vote_slot = get_current_slot(store)
+    votes = store.goldfish_votes.get(vote_slot, [])
     support_votes = [
         record
         for record in votes
         if get_goldfish_resolution_time_ms(store, record) < TIME_MS_INFINITY
     ]
-    return get_head_with_votes(store, votes, support_votes)
+    return get_head_with_votes(store, vote_slot, votes, support_votes)
 ```
 
 ### Confirmation
@@ -866,7 +908,8 @@ def update_confirmation(store: Store, slot: Slot) -> None:
         ]
         if len(distinct) == 0:
             support_votes.append(record)
-    voters_count = count_goldfish_voters(late_votes)
+    committee = get_goldfish_committee_for(store, slot)
+    voters_count = count_goldfish_voters(committee, late_votes)
 
     tree_roots = get_filtered_block_tree(store)
     fg_root = get_fg_root(store)
@@ -877,21 +920,21 @@ def update_confirmation(store: Store, slot: Slot) -> None:
     while True:
         eligible_children = []
         for child in get_children(store, tree_roots, head):
-            score = get_goldfish_score(store, support_votes, support_votes, child)
+            score = get_goldfish_score(store, committee, support_votes, support_votes, child)
             if 2 * score > voters_count:
                 eligible_children.append(child)
         if len(eligible_children) == 0:
             break
         best = eligible_children[0]
-        best_score = get_goldfish_score(store, support_votes, support_votes, best)
+        best_score = get_goldfish_score(store, committee, support_votes, support_votes, best)
         for child in eligible_children[1:]:
-            score = get_goldfish_score(store, support_votes, support_votes, child)
+            score = get_goldfish_score(store, committee, support_votes, support_votes, child)
             if (score, child) > (best_score, best):
                 best = child
                 best_score = score
         head = best
 
-    head_score = get_goldfish_score(store, support_votes, support_votes, head)
+    head_score = get_goldfish_score(store, committee, support_votes, support_votes, head)
     if 2 * head_score > voters_count:
         store.live_confirmed_root = head
         candidate: Root | None = head
@@ -1142,9 +1185,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # Process the carried Goldfish votes
     for included in block.body.goldfish_votes:
-        committee = get_goldfish_committee(
-            store.block_states[block.parent_root], included.aggregate.data.slot
-        )
+        committee = get_goldfish_committee_for(store, included.aggregate.data.slot)
         for i in range(len(committee)):
             if included.aggregate.aggregation_bits[i]:
                 on_goldfish_vote(store, committee[i], included.aggregate.data)
@@ -1153,7 +1194,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # Process the carried attestation rows after the finality update
     for aggregate in block.body.stabilization_aggregates:
-        members = get_round_subnet_members(state, aggregate.subnet_id)
+        members = get_round_subnet_members(state, aggregate.data.round, aggregate.subnet_id)
         for i in range(len(members)):
             if aggregate.aggregation_bits[i]:
                 on_trident_attestation(store, members[i], aggregate.data, None)

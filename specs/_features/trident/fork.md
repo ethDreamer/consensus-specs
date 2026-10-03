@@ -102,6 +102,10 @@ def upgrade_to_trident(pre: heze.BeaconState) -> BeaconState:
         payload_expected_withdrawals=pre.payload_expected_withdrawals,
         ptc_window=pre.ptc_window,
         # [New in Trident]
+        # Empty until the fork epoch's own transition writes it; the first
+        # cross-boundary Goldfish decode happens one epoch after the fork
+        previous_goldfish_committee=GoldfishCommittee(),
+        # [New in Trident]
         height=Height(1),
         # [New in Trident]
         height_entry_root=anchor_root,

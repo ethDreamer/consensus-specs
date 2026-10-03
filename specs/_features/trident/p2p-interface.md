@@ -52,8 +52,9 @@ The following validations MUST pass before forwarding the `vote` on the network.
 
 - _[IGNORE]_ `vote.data.slot` is the current slot or the previous slot (with a
   `MAXIMUM_GOSSIP_CLOCK_DISPARITY` allowance).
-- _[REJECT]_ The validator index is a member of the Goldfish committee of
-  `vote.data.slot`.
+- _[REJECT]_ The validator index occupies at least one seat of the Goldfish
+  committee of `vote.data.slot`, per
+  `get_goldfish_committee_for(store, vote.data.slot)`.
 - _[IGNORE]_ The store holds fewer than two distinct votes from this validator
   for `vote.data.slot`, and this vote is not a duplicate of a held vote.
 - _[REJECT]_ The signature of `vote` is valid with respect to the validator's
@@ -62,7 +63,9 @@ The following validations MUST pass before forwarding the `vote` on the network.
 *Note*: A vote whose head block is unknown is still accepted and forwarded: a
 vote is processed on receipt, whether or not the store holds its head, and
 resolves later. Participation and equivocation are determined by cast votes,
-regardless of resolution.
+regardless of resolution. A validator occupying several committee seats still
+broadcasts exactly one vote; its seat multiplicity is applied at scoring and
+aggregation, not on the wire.
 
 #### `trident_attestation_{subnet_id}`
 
@@ -93,8 +96,10 @@ because validators can submit target and timeout votes again.
 
 - _[IGNORE]_ `aggregate.data.round` is within the expiry window.
 - _[REJECT]_ `aggregate.subnet_id < ROUND_SUBNET_COUNT`.
-- _[REJECT]_ The aggregation bits match the subnet's member count, and at least
-  one bit is set.
+- _[REJECT]_ The aggregation bits match the member count of
+  `get_round_subnet_members(state, aggregate.data.round, aggregate.subnet_id)` —
+  membership is anchored to the round's opening epoch, not the receiving epoch —
+  and at least one bit is set.
 - _[REJECT]_ The aggregate signature is valid over the participating members'
   pubkeys.
 - _[IGNORE]_ The aggregate adds at least one attestation row the node has not
