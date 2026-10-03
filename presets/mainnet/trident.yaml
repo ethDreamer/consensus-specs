@@ -1,0 +1,30 @@
+# Mainnet preset - Trident
+
+# Time parameters
+# ---------------------------------------------------------------
+# 2**3 (= 8) slots
+SLOTS_PER_ROUND: 8
+# 2**3 (= 8) rounds
+SG_EXPIRY_WINDOW: 8
+# 2**3 (= 8) heights
+NON_JUSTIFIABLE_HEIGHT_PERIOD: 8
+# 2**1 (= 2) heights
+MAX_FINALITY_DEBT: 2
+
+# Committee parameters
+# ---------------------------------------------------------------
+# 2**14 (= 16,384) validators
+GOLDFISH_COMMITTEE_SIZE: 16384
+# 2**6 (= 64) subnets
+ROUND_SUBNET_COUNT: 64
+
+# Max operations per block
+# ---------------------------------------------------------------
+# 2**6 (= 64)
+MAX_GOLDFISH_AGGREGATES: 64
+# 2**7 (= 128)
+MAX_STABILIZATION_AGGREGATES: 128
+# 2**7 (= 128)
+MAX_FINALITY_AGGREGATES: 128
+# 2**4 (= 16)
+MAX_TRIDENT_SLASHINGS: 16

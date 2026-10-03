@@ -1,0 +1,30 @@
+# Minimal preset - Trident
+
+# Time parameters
+# ---------------------------------------------------------------
+# [customized] 2**2 (= 4) slots
+SLOTS_PER_ROUND: 4
+# [customized] 2**1 (= 2) rounds
+SG_EXPIRY_WINDOW: 2
+# [customized] 5 heights (the smallest value the proofs permit)
+NON_JUSTIFIABLE_HEIGHT_PERIOD: 5
+# 2**1 (= 2) heights
+MAX_FINALITY_DEBT: 2
+
+# Committee parameters
+# ---------------------------------------------------------------
+# [customized] 2**4 (= 16) validators
+GOLDFISH_COMMITTEE_SIZE: 16
+# [customized] 2**1 (= 2) subnets
+ROUND_SUBNET_COUNT: 2
+
+# Max operations per block
+# ---------------------------------------------------------------
+# 2**6 (= 64)
+MAX_GOLDFISH_AGGREGATES: 64
+# 2**7 (= 128)
+MAX_STABILIZATION_AGGREGATES: 128
+# 2**7 (= 128)
+MAX_FINALITY_AGGREGATES: 128
+# 2**4 (= 16)
+MAX_TRIDENT_SLASHINGS: 16
