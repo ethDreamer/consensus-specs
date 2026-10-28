@@ -41,6 +41,7 @@ choice of [Gloas](../../gloas/fork-choice.md) and
   - [Payload status](#payload-status)
     - [Modified `should_extend_payload`](#modified-should_extend_payload)
     - [New `get_node_execution_block_hash`](#new-get_node_execution_block_hash)
+    - [New `get_safe_execution_block_hash`](#new-get_safe_execution_block_hash)
   - [FG restrictions](#fg-restrictions)
     - [New `is_ancestor_root`](#new-is_ancestor_root)
     - [New `get_fg_root`](#new-get_fg_root)
@@ -165,7 +166,7 @@ from prior upgrades. The fast confirmation rule of prior upgrades is deprecated;
 the confirmed tip takes its place as the safe block.
 
 - `head_block_hash = get_node_execution_block_hash(store, get_head(store))`
-- `safe_block_hash = get_node_execution_block_hash(store, get_confirmed(store))`
+- `safe_block_hash = get_safe_execution_block_hash(store)`
 - `finalized_block_hash = finalized_block_bid.parent_block_hash`
 
 Where:
@@ -578,6 +579,26 @@ def get_node_execution_block_hash(store: Store, node: ForkChoiceNode) -> Hash32:
     if node.payload_status == PAYLOAD_STATUS_FULL:
         return bid.block_hash
     return bid.parent_block_hash
+```
+
+#### New `get_safe_execution_block_hash`
+
+*Note*: The engine requires the safe block to be an ancestor of the head. The
+confirmed record can transiently leave the head's chain in unsafe periods, so
+the safe hash falls back to the finalized block — which descends from no walk
+anchor and is an ancestor of every head by construction — whenever the confirmed
+node does not precede the head.
+
+```python
+def get_safe_execution_block_hash(store: Store) -> Hash32:
+    head = get_head(store)
+    confirmed = get_confirmed(store)
+    if confirmed == head or is_ancestor(store, head, confirmed):
+        return get_node_execution_block_hash(store, confirmed)
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root, payload_status=PAYLOAD_STATUS_PENDING
+    )
+    return get_node_execution_block_hash(store, finalized)
 ```
 
 ### FG restrictions
