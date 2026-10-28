@@ -17,12 +17,18 @@
     - [Preparing for a `BeaconBlock`](#preparing-for-a-beaconblock)
     - [Constructing the `BeaconBlockBody`](#constructing-the-beaconblockbody)
       - [Head votes](#head-votes)
+      - [Safe votes](#safe-votes)
       - [Attestations](#attestations)
       - [Attester slashings](#attester-slashings)
   - [Head voting](#head-voting)
     - [Head vote data](#head-vote-data)
     - [Construct head vote](#construct-head-vote)
     - [Broadcast head vote](#broadcast-head-vote)
+  - [Safe voting](#safe-voting)
+    - [Safe vote assignment](#safe-vote-assignment)
+    - [Safe vote data](#safe-vote-data)
+    - [Construct safe vote](#construct-safe-vote)
+    - [Broadcast safe vote](#broadcast-safe-vote)
   - [Attesting](#attesting)
     - [Attestation data](#attestation-data)
       - [Finality pair](#finality-pair)
@@ -35,6 +41,7 @@
     - [Aggregation selection](#aggregation-selection)
     - [Construct aggregate](#construct-aggregate)
       - [Head votes](#head-votes-1)
+      - [Safe vote aggregation](#safe-vote-aggregation)
       - [FG attestations](#fg-attestations)
       - [Aggregation bits](#aggregation-bits)
     - [Broadcast aggregate](#broadcast-aggregate)
@@ -202,6 +209,15 @@ cleared.
 *TODO*: Specify aggregate selection when the proposal view exceeds
 `MAX_HEAD_VOTES`, preserving the requirements of view merge.
 
+##### Safe votes
+
+Set `block.body.safe_votes` to aggregates from the safe vote pool, up to
+`MAX_SAFE_VOTES`. Each aggregate must satisfy the verification conditions in
+[`process_safe_vote`](./beacon-chain.md#new-process_safe_vote). A proposer
+should prefer aggregates that add voters within the expiry window, and should
+include a validator's second distinct vote of a round when it holds one, since
+the fork choice reads equivocations.
+
 ##### Attestations
 
 Set `block.body.attestations` to aggregates selected from the FG attestation
@@ -277,11 +293,78 @@ another head for the same slot.
 The validator broadcasts `head_vote_message` on the global `head_vote`
 [topic](./p2p-interface.md#new-head_vote) and processes it locally.
 
+### Safe voting
+
+Every active validator creates, signs and broadcasts one `SafeVoteMessage` per
+round, in its assigned sub-round.
+
+#### Safe vote assignment
+
+Safe votes are cast across the first `SLOTS_PER_ROUND - 2` slots of the round,
+after the round's grades complete and early enough that every vote arrives
+before the next round's earliest grade cutoff. The assignment is a pure function
+of the validator index: it schedules bandwidth and carries no other meaning.
+
+```python
+def compute_safe_vote_sub_round(validator_index: ValidatorIndex) -> Uint64:
+    return Uint64(validator_index) % (Uint64(SLOTS_PER_ROUND) - 2)
+```
+
+A validator casts its safe vote for `round` one quarter of the way through slot
+`compute_start_slot_at_round(round) + compute_safe_vote_sub_round(validator_index)`.
+
+*Note*: When the validator's attestation committee slot falls in the same
+sub-round, the safe vote and the FG attestation may share a transport envelope;
+bundling is a networking optimization with no consensus meaning.
+
+#### Safe vote data
+
+First, the validator constructs `safe_vote_data`, a
+[`SafeVoteData`](./beacon-chain.md#new-safevotedata) object:
+
+- Let `node` be the node returned by the fork choice's safe-vote selection,
+  [`get_safe_vote_node`](./fork-choice.md#new-get_safe_vote_node), which applies
+  the grade-0 veto between the anchor and the confirmed node.
+- Set `safe_vote_data.round` to the current round.
+- Set `safe_vote_data.beacon_block_root = node.root`.
+- Set `safe_vote_data.payload_status = node.payload_status`.
+
+#### Construct safe vote
+
+The validator creates `safe_vote_message` as a
+[`SafeVoteMessage`](./beacon-chain.md#new-safevotemessage):
+
+- Set `safe_vote_message.validator_index = validator_index`.
+- Set `safe_vote_message.data = safe_vote_data`.
+- Set `safe_vote_message.signature` to
+  `get_safe_vote_signature(state, safe_vote_data, privkey)`.
+
+```python
+def get_safe_vote_signature(state: BeaconState, data: SafeVoteData, privkey: int) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(data.round))
+    domain = get_domain(state, DOMAIN_SAFE_VOTE, epoch)
+    signing_root = compute_signing_root(data, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+The validator must record the selected node before signing and must not sign
+another safe vote for the same round.
+
+#### Broadcast safe vote
+
+The validator broadcasts `safe_vote_message` on the global `safe_vote`
+[topic](./p2p-interface.md#new-safe_vote) and processes it locally.
+
 ### Attesting
 
 A validator attempts to create an FG attestation in the slot of its attestation
 committee using the rules below. It sends no new attestation if there is no FG
 source or if its signing history suppresses the vote.
+
+*Note*: A height pair is emitted only in rounds where
+[`has_fresh_safe_quorum`](./fork-choice.md#new-has_fresh_safe_quorum) holds —
+the stabilization layer's fresh quorum evidence. Without it, the attestation
+carries its finality pair alone.
 
 *TODO*: Specify the FG attestation deadline and source observation for each
 assigned slot and staggered committee schedule.
@@ -502,6 +585,32 @@ def get_aggregate_head_vote(state: BeaconState, messages: Sequence[HeadVoteMessa
     voter_indices = sorted(signatures)
     return HeadVote(
         voter_indices=HeadVoteCommitteeIndices(data=voter_indices),
+        data=data,
+        signature=bls.Aggregate([signatures[index] for index in voter_indices]),
+    )
+```
+
+##### Safe vote aggregation
+
+Construct `aggregate_safe_vote` using `get_aggregate_safe_vote` with safe vote
+messages for the same round and node. Safe votes aggregate by value, regardless
+of attestation committees: in good times, the round's votes collapse into a few
+aggregates.
+
+```python
+def get_aggregate_safe_vote(messages: Sequence[SafeVoteMessage]) -> SafeVote:
+    """
+    Return the aggregate safe vote for the ``messages`` of one round and node.
+    """
+    assert len(messages) > 0
+    data = messages[0].data
+    assert all(message.data == data for message in messages)
+    signatures = {message.validator_index: message.signature for message in messages}
+    assert len(signatures) == len(messages)
+
+    voter_indices = sorted(signatures)
+    return SafeVote(
+        voter_indices=SafeVoteIndices(data=voter_indices),
         data=data,
         signature=bls.Aggregate([signatures[index] for index in voter_indices]),
     )

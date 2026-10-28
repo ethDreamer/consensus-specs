@@ -20,6 +20,8 @@
   - [New `HeightParticipation`](#new-heightparticipation)
   - [New `LegacyAttesterSlashings`](#new-legacyattesterslashings)
   - [New `PendingFinalities`](#new-pendingfinalities)
+  - [New `SafeVoteIndices`](#new-safevoteindices)
+  - [New `SafeVotes`](#new-safevotes)
   - [New `Round`](#new-round)
   - [New `RoundParticipation`](#new-roundparticipation)
 - [Constants](#constants)
@@ -31,6 +33,7 @@
   - [Finality gadget](#finality-gadget)
   - [Rounds](#rounds)
   - [Head votes](#head-votes)
+  - [Safe votes](#safe-votes)
   - [Rewards](#rewards)
   - [Inactivity leak](#inactivity-leak)
   - [Max operations per block](#max-operations-per-block)
@@ -40,6 +43,9 @@
   - [New `HeadVoteData`](#new-headvotedata)
   - [New `HeadVote`](#new-headvote)
   - [New `HeadVoteMessage`](#new-headvotemessage)
+  - [New `SafeVoteData`](#new-safevotedata)
+  - [New `SafeVote`](#new-safevote)
+  - [New `SafeVoteMessage`](#new-safevotemessage)
   - [Modified `AttestationData`](#modified-attestationdata)
   - [Modified `SingleAttestation`](#modified-singleattestation)
   - [Modified `Attestation`](#modified-attestation)
@@ -113,6 +119,8 @@
         - [Modified `process_attestation`](#modified-process_attestation)
       - [Head votes](#head-votes-1)
         - [New `process_head_vote`](#new-process_head_vote)
+      - [Safe votes](#safe-votes-1)
+        - [New `process_safe_vote`](#new-process_safe_vote)
     - [Height events](#height-events)
       - [New `process_height_events`](#new-process_height_events)
       - [New `advance_height`](#new-advance_height)
@@ -144,6 +152,12 @@ balance, casts head votes. A block carries head votes of the previous and
 current epochs and records which of the previous slot's votes the proposer
 counted as support. The state transition records which seats voted for the block
 of their slot, which weighs builder payments.
+
+Once per round, every active validator also casts a safe vote, naming the block
+it considers confirmed. Safe votes stabilize the available chain's fork choice
+across rounds: they are read only off-chain, by the stabilization rule of the
+[fork choice](./fork-choice.md). Blocks relay them for view merge, and the state
+transition verifies them without recording anything.
 
 Validators cast FG attestations in rounds of `SLOTS_PER_ROUND` slots. A round is
 to the FG what an epoch is to Casper FFG: each active validator attests once,
@@ -329,6 +343,24 @@ class PendingFinalities(List[PendingFinality]):
     LIMIT = PENDING_FINALITY_WINDOW
 ```
 
+### New `SafeVoteIndices`
+
+```python
+class SafeVoteIndices(ProgressiveList[ValidatorIndex]):
+    """
+    The indices of the validators participating in a safe vote.
+    """
+```
+
+### New `SafeVotes`
+
+```python
+class SafeVotes(ProgressiveList[SafeVote]):
+    """
+    The safe votes in a beacon block.
+    """
+```
+
 ### New `Round`
 
 ```python
@@ -376,6 +408,7 @@ the weights still equals `WEIGHT_DENOMINATOR`.
 | `DOMAIN_HEAD_VOTE`           | `DomainType("0x12000000")` |
 | `DOMAIN_HEAD_VOTE_COMMITTEE` | `DomainType("0x13000000")` |
 | `DOMAIN_FINALITY_ATTESTER`   | `DomainType("0x14000000")` |
+| `DOMAIN_SAFE_VOTE`           | `DomainType("0x15000000")` |
 
 ### Misc
 
@@ -412,6 +445,16 @@ the weights still equals `WEIGHT_DENOMINATOR`.
 | -------------------------- | ------------------------- |
 | `HEAD_VOTE_COMMITTEE_SIZE` | `Uint64(2**10)` (= 1,024) |
 
+### Safe votes
+
+*Note*: A safe vote of round `r` is read by the fork choice until round
+`r + SAFE_VOTE_EXPIRY_ROUNDS`, and a block may include it in the same window.
+This is the expiry window `η_SG` of the stabilization rule.
+
+| Name                      | Value               |
+| ------------------------- | ------------------- |
+| `SAFE_VOTE_EXPIRY_ROUNDS` | `Round(2**1)` (= 2) |
+
 ### Rewards
 
 | Name                  | Value                 |
@@ -430,6 +473,7 @@ the weights still equals `WEIGHT_DENOMINATOR`.
 | Name             | Value                |
 | ---------------- | -------------------- |
 | `MAX_HEAD_VOTES` | `Uint64(2**3)` (= 8) |
+| `MAX_SAFE_VOTES` | `Uint64(2**2)` (= 4) |
 
 ## Containers
 
@@ -479,6 +523,44 @@ class HeadVote(ProgressiveContainer):
 class HeadVoteMessage(Container):
     validator_index: ValidatorIndex
     data: HeadVoteData
+    signature: BLSSignature
+```
+
+### New `SafeVoteData`
+
+*Note*: The safe vote names the fork-choice node, a block root and its payload
+status, that the validator considers confirmed in `round`. Honest validators
+vote the confirmed node reported by the fork choice. Safe votes from one
+validator naming two distinct nodes in one round are an equivocation, read by
+the fork choice and not slashable.
+
+```python
+class SafeVoteData(Container):
+    round: Round
+    beacon_block_root: Root
+    payload_status: PayloadStatus
+```
+
+### New `SafeVote`
+
+*Note*: A safe vote aggregate combines validators that name the same node in the
+same round, regardless of their attestation committees.
+
+```python
+class SafeVote(ProgressiveContainer):
+    ACTIVE_FIELDS = active_fields(width=3)
+
+    voter_indices: SafeVoteIndices
+    data: SafeVoteData
+    signature: BLSSignature
+```
+
+### New `SafeVoteMessage`
+
+```python
+class SafeVoteMessage(Container):
+    validator_index: ValidatorIndex
+    data: SafeVoteData
     signature: BLSSignature
 ```
 
@@ -556,7 +638,7 @@ upgrade and should be removed in a later upgrade.
 
 ```python
 class BeaconBlockBody(ProgressiveContainer):
-    ACTIVE_FIELDS = active_fields(width=16, gaps=(1, 6))
+    ACTIVE_FIELDS = active_fields(width=17, gaps=(1, 6))
 
     randao_reveal: BLSSignature
     graffiti: Bytes32
@@ -575,6 +657,8 @@ class BeaconBlockBody(ProgressiveContainer):
     head_vote_support: HeadVoteSupport
     # [New in EIP8453]
     legacy_attester_slashings: LegacyAttesterSlashings
+    # [New in EIP8453]
+    safe_votes: SafeVotes
 ```
 
 ### Modified `BeaconState`
@@ -1644,6 +1728,8 @@ def process_operations(
     assert len(body.head_votes) <= MAX_HEAD_VOTES
     # [New in EIP8453]
     assert len(body.head_vote_support) == len(body.head_votes)
+    # [New in EIP8453]
+    assert len(body.safe_votes) <= MAX_SAFE_VOTES
 
     for_ops(body.proposer_slashings, process_proposer_slashing)
     for_ops(body.attester_slashings, process_attester_slashing)
@@ -1657,6 +1743,8 @@ def process_operations(
     # [New in EIP8453]
     for vote_index in range(len(body.head_votes)):
         process_head_vote(state, body.head_votes[vote_index], body.head_vote_support[vote_index])
+    # [New in EIP8453]
+    for_ops(body.safe_votes, process_safe_vote)
 ```
 
 ##### Legacy attester slashings
@@ -1771,6 +1859,40 @@ def process_head_vote(
         for position, index in enumerate(committee):
             if index in vote.voter_indices:
                 state.head_vote_participation[participation_index][position] = Boolean(True)
+```
+
+##### Safe votes
+
+###### New `process_safe_vote`
+
+*Note*: Safe votes belong to the available chain's stabilization and are read by
+the fork choice. Blocks relay them; the beacon state records nothing. A block
+may include a safe vote from any active validator while the vote's round is
+within the expiry window.
+
+```python
+def process_safe_vote(state: BeaconState, vote: SafeVote) -> None:
+    data = vote.data
+    current_round = get_current_round(state)
+    assert data.round <= current_round
+    assert data.round + SAFE_VOTE_EXPIRY_ROUNDS >= current_round
+    assert data.payload_status in (
+        PAYLOAD_STATUS_EMPTY,
+        PAYLOAD_STATUS_FULL,
+        PAYLOAD_STATUS_PENDING,
+    )
+
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(data.round))
+    assert len(vote.voter_indices) > 0
+    assert list(vote.voter_indices) == sorted(set(vote.voter_indices))
+    for index in vote.voter_indices:
+        assert is_active_validator(state.validators[index], epoch)
+
+    # Verify signature
+    pubkeys = [state.validators[index].pubkey for index in vote.voter_indices]
+    domain = get_domain(state, DOMAIN_SAFE_VOTE, epoch)
+    signing_root = compute_signing_root(data, domain)
+    assert bls.FastAggregateVerify(pubkeys, signing_root, vote.signature)
 ```
 
 #### Height events

@@ -21,7 +21,9 @@
       - [Deprecated `beacon_aggregate_and_proof`](#deprecated-beacon_aggregate_and_proof)
       - [Modified `attester_slashing`](#modified-attester_slashing)
       - [New `head_vote`](#new-head_vote)
+      - [New `safe_vote`](#new-safe_vote)
       - [New `head_vote_aggregate`](#new-head_vote_aggregate)
+      - [New `safe_vote_aggregate`](#new-safe_vote_aggregate)
       - [New `attestation_aggregate`](#new-attestation_aggregate)
     - [Attestation subnets](#attestation-subnets)
       - [Deprecated `beacon_attestation_{subnet_id}`](#deprecated-beacon_attestation_subnet_id)
@@ -92,6 +94,10 @@ class Seen:
     attestation_validator_rounds: set[tuple[Round, ValidatorIndex]]
     # [New in EIP8453]
     head_vote_validator_slots: set[tuple[Slot, ValidatorIndex]]
+    # [New in EIP8453]
+    safe_vote_data_roots: set[tuple[Round, ValidatorIndex, Root]]
+    # [New in EIP8453]
+    safe_vote_distinct_counts: Counter[tuple[Round, ValidatorIndex]]
 ```
 
 ### Modified `compute_fork_version`
@@ -174,6 +180,11 @@ def verify_block_body_operation_limits(body: BeaconBlockBody) -> None:
     # [REJECT] The legacy attester slashing count is within the limit
     if len(body.legacy_attester_slashings) > MAX_ATTESTER_SLASHINGS_ELECTRA:
         raise GossipReject("too many legacy attester slashings")
+
+    # [New in EIP8453]
+    # [REJECT] The safe vote count is within the limit
+    if len(body.safe_votes) > MAX_SAFE_VOTES:
+        raise GossipReject("too many safe votes")
 ```
 
 ### New `is_finalized_ancestor`
@@ -268,6 +279,7 @@ deprecated, and the `head_vote` and `attestation_{subnet_id}` topics are new:
 | `beacon_block`            | `SignedBeaconBlock` (modified) |
 | `attester_slashing`       | `AttesterSlashing` (modified)  |
 | `head_vote`               | `HeadVoteMessage`              |
+| `safe_vote`               | `SafeVoteMessage`              |
 | `attestation_{subnet_id}` | `SingleAttestation` (modified) |
 
 Legacy attester slashings are not propagated on gossip. A proposer includes the
@@ -458,10 +470,95 @@ def validate_head_vote_gossip(
     seen.head_vote_validator_slots.add(head_vote_key)
 ```
 
+##### New `safe_vote`
+
+This topic is used to propagate safe votes as `SafeVoteMessage`.
+
+*Note*: Unlike other vote topics, up to *two* messages with distinct data per
+validator per round are propagated: the second distinct vote is equivocation
+evidence, read by the fork choice's stabilization rule, and suppressing it would
+hide the equivocation from part of the network.
+
+```python
+def validate_safe_vote_gossip(
+    seen: Seen,
+    store: Store,
+    safe_vote_message: SafeVoteMessage,
+    current_time_ms: Uint64,
+) -> None:
+    """
+    Validate a SafeVoteMessage for gossip propagation.
+    Raises GossipIgnore or GossipReject on validation failure.
+    """
+    data = safe_vote_message.data
+    validator_index = safe_vote_message.validator_index
+    round_start_slot = compute_start_slot_at_round(data.round)
+
+    # [REJECT] The safe vote's round is at or after the EIP-8453 fork
+    if compute_epoch_at_slot(round_start_slot) < EIP8453_FORK_EPOCH:
+        raise GossipReject("safe vote's round is pre-eip8453")
+
+    # [REJECT] The payload status is a voteable status
+    if data.payload_status not in (
+        PAYLOAD_STATUS_EMPTY,
+        PAYLOAD_STATUS_FULL,
+        PAYLOAD_STATUS_PENDING,
+    ):
+        raise GossipReject("safe vote has an invalid payload status")
+
+    # [IGNORE] The safe vote is for the current round
+    current_slot = Slot((current_time_ms - store.genesis_time_ms) // SLOT_DURATION_MS)
+    if data.round != compute_round_at_slot(current_slot):
+        raise GossipIgnore("safe vote is not for the current round")
+
+    # [IGNORE] This exact safe vote has not been seen
+    data_key = (data.round, validator_index, hash_tree_root(data))
+    if data_key in seen.safe_vote_data_roots:
+        raise GossipIgnore("already seen this safe vote")
+
+    # [IGNORE] At most two distinct safe votes per validator per round propagate
+    distinct_key = (data.round, validator_index)
+    if seen.safe_vote_distinct_counts[distinct_key] >= 2:
+        raise GossipIgnore("already seen two distinct safe votes from this validator")
+
+    # [IGNORE] The block being voted for has been seen (via gossip or non-gossip sources)
+    # (MAY be queued until block is retrieved)
+    block_root = data.beacon_block_root
+    if block_root not in store.blocks:
+        raise GossipIgnore("block being voted for has not been seen")
+
+    state = store.block_states[get_head(store).root]
+
+    # [IGNORE] The finalized block is an ancestor of the block being voted for
+    if not is_finalized_ancestor(store, state, block_root):
+        raise GossipIgnore("finalized block is not an ancestor of the block being voted for")
+
+    # [REJECT] The validator is active in the round's epoch
+    validator = state.validators[validator_index]
+    if not is_active_validator(validator, compute_epoch_at_slot(round_start_slot)):
+        raise GossipReject("validator is not active")
+
+    # [REJECT] The signature is valid
+    domain = get_domain(state, DOMAIN_SAFE_VOTE, compute_epoch_at_slot(round_start_slot))
+    signing_root = compute_signing_root(data, domain)
+    if not bls.Verify(validator.pubkey, signing_root, safe_vote_message.signature):
+        raise GossipReject("invalid safe vote signature")
+
+    # Mark this safe vote as seen
+    seen.safe_vote_data_roots.add(data_key)
+    seen.safe_vote_distinct_counts[distinct_key] += 1
+```
+
 ##### New `head_vote_aggregate`
 
 *TODO*: Specify this topic, which propagates aggregated head votes, together
 with aggregator selection in the honest validator guide.
+
+##### New `safe_vote_aggregate`
+
+*TODO*: Specify this topic, which propagates aggregated safe votes grouped by
+round and node, together with aggregator selection in the honest validator
+guide.
 
 ##### New `attestation_aggregate`
 

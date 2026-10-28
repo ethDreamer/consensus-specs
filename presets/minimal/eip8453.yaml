@@ -19,6 +19,11 @@ MAX_VALIDATORS_PER_AGGREGATE: 512
 # [customized] 2**4 (= 16)
 HEAD_VOTE_COMMITTEE_SIZE: 16
 
+# Safe votes
+# ---------------------------------------------------------------
+# 2**1 (= 2)
+SAFE_VOTE_EXPIRY_ROUNDS: 2
+
 # Rewards
 # ---------------------------------------------------------------
 # [customized] 2**5 (= 32)
@@ -35,6 +40,8 @@ EJECTION_INACTIVITY_SCORE: 65536
 # ---------------------------------------------------------------
 # 2**3 (= 8)
 MAX_HEAD_VOTES: 8
+# 2**2 (= 4)
+MAX_SAFE_VOTES: 4
 
 # Type-specific SSZ bounds
 # ---------------------------------------------------------------
