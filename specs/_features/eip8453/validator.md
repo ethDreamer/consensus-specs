@@ -70,8 +70,15 @@ All terminology, constants, functions, and protocol mechanics defined in
 [EIP-8453 -- The Beacon Chain](./beacon-chain.md) are requisite for this
 document and used throughout.
 
-*TODO*: Specify the EIP-8453 fork-choice interfaces and duty deadlines
-referenced below.
+Each duty reads the [fork choice](./fork-choice.md) exactly once, at its
+deadline:
+
+| Duty           | Deadline                                                  | Fork-choice read                                 |
+| -------------- | --------------------------------------------------------- | ------------------------------------------------ |
+| Proposal       | start of the slot                                         | `get_head(store, Slot(slot - 1))`                |
+| Head vote      | `get_head_vote_due_ms()` into the slot                    | `get_voter_head(store, slot)`                    |
+| Safe vote      | `get_head_vote_due_ms()` into the assigned sub-round slot | `get_safe_vote_node(store)`                      |
+| FG attestation | `get_attestation_due_ms()` into the committee's slot      | `get_fg_target_source`, `get_fg_finality_source` |
 
 ## Helpers
 
@@ -162,8 +169,13 @@ Assignments are computed from the chain state using `get_attestation_committee`
 and `get_head_vote_committee`. A validator should recompute its assignment when
 the dependent chain state changes.
 
-*TODO*: Specify assignment lookahead and the dependent root in the EIP-8453
-fork-choice and networking specifications.
+Assignments are read from the finalized chain, matching
+[`get_head_vote_committee_at_slot`](./fork-choice.md#new-get_head_vote_committee_at_slot)
+in the fork choice: the dependent root is the latest finalized block root, and
+the state's `head_vote_committee_window` provides `MIN_SEED_LOOKAHEAD` epochs of
+lookahead. A validator recomputes its assignments when the finalized block
+changes. The exact dependent state remains under discussion; see the fork-choice
+[divergence notes](./fork-choice.md#divergences-from-the-paper).
 
 ## Beacon chain responsibilities
 
@@ -179,8 +191,19 @@ slot during which `is_proposer(state, validator_index)` returns `True`.
 Let `parent` be the block returned by the AC proposal procedure, together with
 its previous slot head-vote view.
 
-*TODO*: Specify the EIP-8453 proposal helper, including full or empty execution
-payload selection and inclusion-list checks.
+The AC proposal procedure selects the parent at the start of the slot:
+
+- Let `head = get_head(store, Slot(slot - 1))`: the walk over the previous
+  slot's votes in the proposer's full view. The proposer applies no view freeze;
+  it uses every previous-slot vote it holds, and publishes that view through the
+  block's head votes and support bits.
+- Build on the full payload of `head.root` when
+  `should_build_on_full(store, head, slot)` holds, and on the empty node
+  otherwise.
+- Execution payload bid selection and inclusion-list handling are inherited from
+  [Heze](../../heze/validator.md), with
+  [`should_extend_payload`](./fork-choice.md#modified-should_extend_payload) as
+  modified in the fork choice.
 
 #### Constructing the `BeaconBlockBody`
 
@@ -245,12 +268,17 @@ position in block processing.
 A validator on the head vote committee of `slot` creates, signs and broadcasts a
 `HeadVoteMessage` for that slot.
 
-*Note*: In the Goldilocks schedule, head voting occurs one quarter of the way
-through the slot, after unlocking against the previous slot's votes. The
-validator must satisfy the fork choice's observation requirement after waking
-up.
+*Note*: Head voting occurs one quarter of the way through the slot, after
+reconciling with the previous slot's votes as published by the slot's proposals
+(view merge). A validator that has just started or finished syncing must observe
+one complete slot before voting: it cannot reconcile against votes it was not
+online to receive.
 
-*TODO*: Specify the EIP-8453 head-vote deadline and voting helper.
+The head-vote deadline is `get_head_vote_due_ms()` into the slot. At the
+deadline, the validator obtains its head from
+[`get_voter_head`](./fork-choice.md#new-get_voter_head), which applies view
+merge, the stabilization anchor and the FG restrictions over the frozen voting
+view.
 
 #### Head vote data
 
@@ -366,8 +394,12 @@ source or if its signing history suppresses the vote.
 the stabilization layer's fresh quorum evidence. Without it, the attestation
 carries its finality pair alone.
 
-*TODO*: Specify the FG attestation deadline and source observation for each
-assigned slot and staggered committee schedule.
+The FG attestation deadline is `get_attestation_due_ms()` into the committee's
+assigned slot. At the deadline, the validator takes a single observation of the
+fork choice — the source below through
+[`get_fg_target_source`](./fork-choice.md#new-get_fg_target_source) and the head
+through [`get_fg_finality_source`](./fork-choice.md#new-get_fg_finality_source)
+— so the pair rules read one consistent view.
 
 #### Attestation data
 

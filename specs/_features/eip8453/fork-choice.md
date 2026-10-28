@@ -14,6 +14,9 @@ choice of [Gloas](../../gloas/fork-choice.md) and
 
 - [Introduction](#introduction)
 - [Constants](#constants)
+- [Protocols](#protocols)
+  - [`ExecutionEngine`](#executionengine)
+    - [Modified `notify_forkchoice_updated`](#modified-notify_forkchoice_updated)
 - [Types](#types)
   - [New `StoreHeadVote`](#new-storeheadvote)
   - [New `StoreSafeVote`](#new-storesafevote)
@@ -37,6 +40,7 @@ choice of [Gloas](../../gloas/fork-choice.md) and
     - [New `compute_goldfish_head`](#new-compute_goldfish_head)
   - [Payload status](#payload-status)
     - [Modified `should_extend_payload`](#modified-should_extend_payload)
+    - [New `get_node_execution_block_hash`](#new-get_node_execution_block_hash)
   - [FG restrictions](#fg-restrictions)
     - [New `is_ancestor_root`](#new-is_ancestor_root)
     - [New `get_fg_root`](#new-get_fg_root)
@@ -148,6 +152,26 @@ cutoff admitting counter-evidence, and each pair one `Δ` from the next:
 | 2     | `T_r − 5Δ`   | `T_r − Δ`   | `T_r − Δ`   |
 | 1     | `T_r − 4Δ`   | `T_r − 2Δ`  | `T_r`       |
 | 0     | `T_r − 3Δ`   | `T_r − 3Δ`  | `T_r + Δ`   |
+
+## Protocols
+
+### `ExecutionEngine`
+
+#### Modified `notify_forkchoice_updated`
+
+In EIP-8453, the forkchoice state values **MUST** be computed as follows. All
+other semantics of `notify_forkchoice_updated` and its invocation are inherited
+from prior upgrades. The fast confirmation rule of prior upgrades is deprecated;
+the confirmed tip takes its place as the safe block.
+
+- `head_block_hash = get_node_execution_block_hash(store, get_head(store))`
+- `safe_block_hash = get_node_execution_block_hash(store, get_confirmed(store))`
+- `finalized_block_hash = finalized_block_bid.parent_block_hash`
+
+Where:
+
+- `finalized_block = store.blocks[store.finalized_checkpoint.root]`
+- `finalized_block_bid = finalized_block.body.signed_execution_payload_bid.message`
 
 ## Types
 
@@ -540,6 +564,20 @@ def should_extend_payload(store: Store, root: Root) -> bool:
     payload_is_timely = payload_timeliness(store, root, timely=True)
     payload_data_is_available = payload_data_availability(store, root, available=True)
     return payload_is_timely and payload_data_is_available
+```
+
+#### New `get_node_execution_block_hash`
+
+*Note*: The execution block hash a fork-choice node stands for: the node's own
+payload when it is *full*, and the parent chain's latest payload when the node's
+payload is *empty* or still *pending*.
+
+```python
+def get_node_execution_block_hash(store: Store, node: ForkChoiceNode) -> Hash32:
+    bid = store.blocks[node.root].body.signed_execution_payload_bid.message
+    if node.payload_status == PAYLOAD_STATUS_FULL:
+        return bid.block_hash
+    return bid.parent_block_hash
 ```
 
 ### FG restrictions
