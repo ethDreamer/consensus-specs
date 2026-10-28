@@ -182,8 +182,7 @@ Assignments are read from the finalized chain, matching
 in the fork choice: the dependent root is the latest finalized block root, and
 the state's `head_vote_committee_window` provides `MIN_SEED_LOOKAHEAD` epochs of
 lookahead. A validator recomputes its assignments when the finalized block
-changes. The exact dependent state remains under discussion; see the fork-choice
-[divergence notes](./fork-choice.md#divergences-from-the-paper).
+changes.
 
 ## Beacon chain responsibilities
 

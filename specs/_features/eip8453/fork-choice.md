@@ -351,10 +351,11 @@ def get_view_freeze_due_ms() -> Uint64:
 
 #### New `get_head_vote_committee_at_slot`
 
-*Note*: The committee is computed from the finalized chain, which is stable
-across branches. *TODO*: The exact dependent state for committee computation is
-an open design question, shared with the committee-assignment TODO in the
-[validator guide](./validator.md).
+*Note*: The dependent state for committee computation is the latest finalized
+block's post-state: it is stable across branches, every head vote's committee
+descends from it, and it changes only on finality advances, when assignments are
+recomputed. The same choice fixes the weight-reading state of the stabilization
+rule.
 
 ```python
 def get_head_vote_committee_at_slot(store: Store, slot: Slot) -> HeadVoteCommittee:
@@ -681,9 +682,8 @@ strictly exceeds opposing weight: there is no absolute threshold, so the test is
 meaningful at any participation level, and two conflicting nodes can never both
 hold it.
 
-*Note*: *TODO*: Weights are read from the finalized state; the exact
-weight-reading state is an open design question, shared with the
-committee-dependence TODO.
+*Note*: Weights are read from the latest finalized block's post-state, the same
+dependent state that fixes the head vote committees.
 
 #### New `get_node_parent`
 
@@ -1598,9 +1598,11 @@ this upgrade:
    complete and early enough to arrive before the next round's earliest cutoff.
    The paper's theorems are being re-established for this *vote window* schedule
    in the Lean development; the single instant is the zero-width instance.
-4. **Committee dependence.** The paper's committees are an oracle; here they are
-   computed from a state of the finalized chain, with the exact dependent state
-   left open.
+4. **Committee dependence.** The paper's committees are an oracle; here
+   committees and stabilization weights are computed from the latest finalized
+   block's post-state, which is stable across branches. During prolonged
+   non-finality this state ages; advancing it is a hardening question for the
+   normative specification.
 5. **Timeout delay.** The beacon chain sets `TIMEOUT_DELAY_SLOTS` to two rounds,
    matching the paper's `δ_t = 2R`; its liveness results are proved for
    `δ_t = (2 + e)R`, `e ≥ 0`.
