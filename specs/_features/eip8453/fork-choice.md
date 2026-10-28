@@ -1601,9 +1601,9 @@ this upgrade:
 4. **Committee dependence.** The paper's committees are an oracle; here they are
    computed from a state of the finalized chain, with the exact dependent state
    left open.
-5. **Timeout delay.** The paper sets the timeout delay to two rounds
-   (`δ_t = 2R`), and its liveness results are proved for `δ_t = (2 + e)R`,
-   `e ≥ 0`. The beacon chain currently sets `TIMEOUT_DELAY_SLOTS` to one round.
+5. **Timeout delay.** The beacon chain sets `TIMEOUT_DELAY_SLOTS` to two rounds,
+   matching the paper's `δ_t = 2R`; its liveness results are proved for
+   `δ_t = (2 + e)R`, `e ≥ 0`.
 6. **Sparse ticks.** The paper runs every public time's tick exactly once; this
    document evaluates only the most recent due confirmation when ticks are
    sparse.

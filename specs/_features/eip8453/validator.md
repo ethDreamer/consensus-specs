@@ -39,11 +39,19 @@
     - [Broadcast attestation](#broadcast-attestation)
   - [Attestation aggregation](#attestation-aggregation)
     - [Aggregation selection](#aggregation-selection)
+      - [Head vote aggregation selection](#head-vote-aggregation-selection)
+      - [Safe vote aggregation selection](#safe-vote-aggregation-selection)
+      - [FG attestation aggregation selection](#fg-attestation-aggregation-selection)
     - [Construct aggregate](#construct-aggregate)
       - [Head votes](#head-votes-1)
       - [Safe vote aggregation](#safe-vote-aggregation)
       - [FG attestations](#fg-attestations)
       - [Aggregation bits](#aggregation-bits)
+    - [Aggregate wrappers](#aggregate-wrappers)
+      - [New `HeadVoteAggregateAndProof`](#new-headvoteaggregateandproof)
+      - [New `SignedHeadVoteAggregateAndProof`](#new-signedheadvoteaggregateandproof)
+      - [New `SafeVoteAggregateAndProof`](#new-safevoteaggregateandproof)
+      - [New `SignedSafeVoteAggregateAndProof`](#new-signedsafevoteaggregateandproof)
     - [Broadcast aggregate](#broadcast-aggregate)
 
 <!-- mdformat-toc end -->
@@ -588,8 +596,63 @@ signers cannot be combined by adding their signatures.
 
 #### Aggregation selection
 
-*TODO*: Specify aggregator selection for head votes and FG attestations. The
-legacy aggregation helpers require adaptation to EIP-8453 committees.
+Aggregators self-select with a selection proof, as in prior upgrades: a
+validator is an aggregator when the hash of its proof clears a modulo chosen to
+yield `TARGET_AGGREGATORS_PER_COMMITTEE` expected aggregators per group. The
+groups are the slot's head vote committee, the sub-round's safe voters, and the
+round's attestation committee, each with its own proof domain so one signature
+never serves two roles.
+
+```python
+def is_selected_aggregator(selection_proof: BLSSignature, members: Uint64) -> bool:
+    modulo = max(1, members // TARGET_AGGREGATORS_PER_COMMITTEE)
+    return bytes_to_uint64(sha256(selection_proof)[0:8]) % modulo == 0
+```
+
+##### Head vote aggregation selection
+
+A member of the slot's head vote committee is an aggregator for the slot when
+`is_selected_aggregator(proof, HEAD_VOTE_COMMITTEE_SIZE)` holds for its proof. A
+validator holding several seats gets no additional selection chances.
+
+```python
+def get_head_vote_aggregator_proof(state: BeaconState, slot: Slot, privkey: int) -> BLSSignature:
+    domain = get_domain(state, DOMAIN_HEAD_VOTE_AGGREGATOR, compute_epoch_at_slot(slot))
+    signing_root = compute_signing_root(slot, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+##### Safe vote aggregation selection
+
+An active validator is a safe vote aggregator for the round when
+`is_selected_aggregator(proof, members)` holds for its proof, where `members` is
+the number of active validators assigned to its sub-round,
+`len(get_active_validator_indices(state, epoch)) // (SLOTS_PER_ROUND - 2)`.
+
+```python
+def get_safe_vote_aggregator_proof(state: BeaconState, round: Round, privkey: int) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(round))
+    domain = get_domain(state, DOMAIN_SAFE_VOTE_AGGREGATOR, epoch)
+    signing_root = compute_signing_root(round, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+##### FG attestation aggregation selection
+
+A member of an attestation committee is an aggregator for the round when
+`is_selected_aggregator(proof, members)` holds for its proof, where `members` is
+its committee's size. A validator sits on one committee per round, so the proof
+signs the round alone.
+
+```python
+def get_attestation_aggregator_proof(
+    state: BeaconState, round: Round, privkey: int
+) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(round))
+    domain = get_domain(state, DOMAIN_ATTESTATION_AGGREGATOR, epoch)
+    signing_root = compute_signing_root(round, domain)
+    return bls.Sign(privkey, signing_root)
+```
 
 #### Construct aggregate
 
@@ -716,13 +779,63 @@ def get_attestation_aggregation_bits(
     return aggregation_bits
 ```
 
+#### Aggregate wrappers
+
+Aggregates travel on gossip wrapped with the aggregator's identity and selection
+proof, and the wrapper is signed under `DOMAIN_AGGREGATE_AND_PROOF`. FG
+attestation aggregates reuse the inherited `AggregateAndProof` and
+`SignedAggregateAndProof` containers; head votes and safe votes get their own.
+
+##### New `HeadVoteAggregateAndProof`
+
+```python
+class HeadVoteAggregateAndProof(Container):
+    aggregator_index: ValidatorIndex
+    aggregate: HeadVote
+    selection_proof: BLSSignature
+```
+
+##### New `SignedHeadVoteAggregateAndProof`
+
+```python
+class SignedHeadVoteAggregateAndProof(Container):
+    message: HeadVoteAggregateAndProof
+    signature: BLSSignature
+```
+
+##### New `SafeVoteAggregateAndProof`
+
+```python
+class SafeVoteAggregateAndProof(Container):
+    aggregator_index: ValidatorIndex
+    aggregate: SafeVote
+    selection_proof: BLSSignature
+```
+
+##### New `SignedSafeVoteAggregateAndProof`
+
+```python
+class SignedSafeVoteAggregateAndProof(Container):
+    message: SafeVoteAggregateAndProof
+    signature: BLSSignature
+```
+
 #### Broadcast aggregate
 
-The validator broadcasts the aggregate for block inclusion.
+An aggregator broadcasts its wrapped aggregates on the matching topic and
+retains them for block inclusion:
 
-*TODO*: Specify aggregate gossip messages, selection-proof wrappers and
-broadcast deadlines. Gossip deduplication must use the data and signers, since
-the epoch is not signed.
+- Head vote aggregates by two quarters of the way through the vote's slot, on
+  `head_vote_aggregate`, so the next slot's proposer holds them in time for view
+  merge.
+- Safe vote aggregates by two quarters of the way through the aggregator's
+  sub-round slot, on `safe_vote_aggregate`, covering every vote of the round
+  seen so far, one aggregate per distinct `SafeVoteData`.
+- FG attestation aggregates at the inherited aggregate deadline of the
+  committee's slot, on `attestation_aggregate`.
+
+*Note*: Gossip deduplication must use the data and signers, since an FG
+aggregate's epoch is not signed.
 
 *Note*: An FG aggregate's epoch must be between
 `compute_epoch_at_slot(state.finalized_slot)` and `get_current_epoch(state)`,
