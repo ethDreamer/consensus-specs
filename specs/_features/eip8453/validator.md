@@ -17,6 +17,7 @@
     - [Preparing for a `BeaconBlock`](#preparing-for-a-beaconblock)
     - [Constructing the `BeaconBlockBody`](#constructing-the-beaconblockbody)
       - [Head votes](#head-votes)
+        - [Aggregate selection](#aggregate-selection)
       - [Safe votes](#safe-votes)
       - [Attestations](#attestations)
       - [Attester slashings](#attester-slashings)
@@ -236,8 +237,33 @@ whose slot is no later than the vote's slot. Otherwise, clear the bit.
 *Note*: A vote for an unknown block may be included with its support bits
 cleared.
 
-*TODO*: Specify aggregate selection when the proposal view exceeds
-`MAX_HEAD_VOTES`, preserving the requirements of view merge.
+###### Aggregate selection
+
+When the proposal view holds more distinct previous-slot vote data values than
+`MAX_HEAD_VOTES`, the proposer packs greedily by displacement cost:
+
+1. Form one aggregate per distinct previous-slot `HeadVoteData` value, each
+   covering every voter of that data in the proposal view.
+2. Give priority to each aggregate that completes an *equivocation pair* — the
+   second distinct vote of a validator whose other vote is already included —
+   since it flips that validator from supporting one branch to counting against
+   every branch.
+3. Fill the remaining space with the previous-slot aggregates in descending
+   order of committee seats covered, then with older-epoch votes that add seats
+   for the block of their slot, which weigh builder payments.
+
+Packing the largest groups first is not for their own benefit — every voter
+already holds the majority groups — but to price out displacement: evicting an
+aggregate covering `s` seats requires `MAX_HEAD_VOTES` larger groups, so more
+than `MAX_HEAD_VOTES * s` adversarial seats, and the honest majority's
+aggregates can never be displaced. Honest votes for the same head share one
+aggregate, so honest convergence never contends for space.
+
+*Note*: Omission is bounded, not eliminated: an adversary spending seats on
+distinct data values can still push the smallest groups below the cut, and the
+walk's strict-majority eligibility has no slack to absorb the resulting view
+divergence. Quantifying the omission bound against the committee's honest
+majority — or adding threshold slack that absorbs it — remains open analysis.
 
 ##### Safe votes
 
