@@ -1352,13 +1352,24 @@ def get_fg_finality_source(store: Store) -> BeaconState:
 
 #### New `has_fresh_safe_quorum`
 
-*Note*: A validator emits a height pair only in rounds with an active grade-2
-node — fresh quorum evidence from the stabilization layer. Without it, the
-attestation carries its finality pair alone.
+*Note*: A validator emits a height pair only in rounds whose grade-2 node is
+compatible with the FG root — fresh quorum evidence from the stabilization
+layer. Without it, the attestation carries its finality pair alone. The test is
+compatibility, not an active prefix: heights advance per block while grades
+resolve per round, so on a healthy chain the grade trails the justified root as
+its ancestor. Requiring the grade to descend the FG root would withhold height
+pairs until a timeout lowered the root back to the finalized checkpoint,
+degrading justification to an oscillation at timeout speed.
 
 ```python
 def has_fresh_safe_quorum(store: Store) -> bool:
-    return get_active_prefix(store, store.grade_2) is not None
+    grade = store.grade_2
+    if grade is None or grade.root not in store.blocks:
+        return False
+    fg_root = get_fg_root(store)
+    return is_ancestor_root(store, fg_root, grade.root) or is_ancestor_root(
+        store, grade.root, fg_root
+    )
 ```
 
 ## Handlers
@@ -1583,11 +1594,11 @@ this upgrade:
    majority of members; this upgrade samples `HEAD_VOTE_COMMITTEE_SIZE` seats by
    effective balance, with duplicates. Every score and majority here counts
    seats, matching the state transition's builder payment accounting.
-2. **Payload-status nodes.** The paper's fork choice walks blocks; this upgrade
+1. **Payload-status nodes.** The paper's fork choice walks blocks; this upgrade
    walks `(root, payload_status)` nodes as in Gloas, and `HeadVoteData` names a
    payload status. Votes for different payload statuses with the same root are
    distinct votes by the equivocation rule.
-3. **A separate safe-vote message.** The paper's SG votes ride the combined
+1. **A separate safe-vote message.** The paper's SG votes ride the combined
    attestation's `safe` field; this upgrade carries them as their own wire
    object, the [safe vote](./beacon-chain.md#new-safevotedata), signed
    separately so FG attestation aggregation is untouched and safe votes
@@ -1598,15 +1609,15 @@ this upgrade:
    complete and early enough to arrive before the next round's earliest cutoff.
    The paper's theorems are being re-established for this *vote window* schedule
    in the Lean development; the single instant is the zero-width instance.
-4. **Committee dependence.** The paper's committees are an oracle; here
+1. **Committee dependence.** The paper's committees are an oracle; here
    committees and stabilization weights are computed from the latest finalized
    block's post-state, which is stable across branches. During prolonged
    non-finality this state ages; advancing it is a hardening question for the
    normative specification.
-5. **Timeout delay.** The beacon chain sets `TIMEOUT_DELAY_SLOTS` to two rounds,
+1. **Timeout delay.** The beacon chain sets `TIMEOUT_DELAY_SLOTS` to two rounds,
    matching the paper's `δ_t = 2R`; its liveness results are proved for
    `δ_t = (2 + e)R`, `e ≥ 0`.
-6. **Sparse ticks.** The paper runs every public time's tick exactly once; this
+1. **Sparse ticks.** The paper runs every public time's tick exactly once; this
    document evaluates only the most recent due confirmation when ticks are
    sparse.
 
