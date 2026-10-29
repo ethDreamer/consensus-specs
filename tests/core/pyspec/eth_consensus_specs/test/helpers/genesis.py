@@ -15,6 +15,7 @@ from eth_consensus_specs.test.helpers.forks import (
     is_post_deneb,
     is_post_eip8148,
     is_post_eip8321,
+    is_post_eip8453,
     is_post_electra,
     is_post_fulu,
     is_post_gloas,
@@ -159,8 +160,9 @@ def create_genesis_state(spec, validator_balances, activation_threshold, builder
             validator.activation_eligibility_epoch = spec.GENESIS_EPOCH
             validator.activation_epoch = spec.GENESIS_EPOCH
         if is_post_altair(spec):
-            state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
-            state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+            if not is_post_eip8453(spec):
+                state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+                state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
             state.inactivity_scores.append(spec.Uint64(0))
 
     # Set genesis validators root for domain separation and chain versioning
@@ -242,6 +244,21 @@ def create_genesis_state(spec, validator_balances, activation_threshold, builder
     if is_post_fulu(spec):
         # Initialize proposer lookahead list
         state.proposer_lookahead = initialize_proposer_lookahead(spec, state)
+
+    if is_post_eip8453(spec):
+        validator_count = len(validator_balances)
+        # The chain starts at height 1; the target root is filled by process_slot
+        state.target_checkpoint = spec.HeightCheckpoint(height=1, root=spec.Root())
+        state.target_participation = spec.HeightParticipation(
+            data=[spec.Boolean(0)] * validator_count
+        )
+        state.progress_participation = spec.HeightParticipation(
+            data=[spec.Boolean(0)] * validator_count
+        )
+        state.round_participation = spec.RoundParticipation(
+            data=[spec.ParticipationFlags(0b0000_0000)] * validator_count
+        )
+        state.head_vote_committee_window = spec.initialize_head_vote_committee_window(state)
 
     return state
 

@@ -24,6 +24,7 @@ from .helpers.constants import (
     EIP8148,
     EIP8205,
     EIP8321,
+    EIP8453,
     ELECTRA,
     FULU,
     GLOAS,
@@ -423,10 +424,10 @@ def config_fork_epoch_overrides(spec, state):
     if state.fork.current_version == spec.config.GENESIS_FORK_VERSION:
         return {}
 
-    for fork in ALL_PHASES:
+    for fork in ALLOWED_TEST_RUNNER_FORKS:
         if fork != PHASE0 and _check_current_version(spec, state, fork):
             overrides = {}
-            for f in ALL_PHASES:
+            for f in ALLOWED_TEST_RUNNER_FORKS:
                 if f != PHASE0 and is_post_fork(fork, f):
                     overrides[f.upper() + "_FORK_EPOCH"] = spec.GENESIS_EPOCH
             return overrides
@@ -753,13 +754,14 @@ with_bellatrix_and_later = with_all_phases_from(BELLATRIX)
 with_capella_and_later = with_all_phases_from(CAPELLA)
 with_deneb_and_later = with_all_phases_from(DENEB)
 with_electra_and_later = with_all_phases_from(ELECTRA)
-with_fulu_and_later = with_all_phases_from(FULU, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_gloas_and_later = with_all_phases_from(GLOAS, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_heze_and_later = with_all_phases_from(HEZE, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_eip8025_and_later = with_all_phases_from(EIP8025, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_eip8148_and_later = with_all_phases_from(EIP8148, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_eip8205_and_later = with_all_phases_from(EIP8205, all_phases=ALLOWED_TEST_RUNNER_FORKS)
-with_eip8321_and_later = with_all_phases_from(EIP8321, all_phases=ALLOWED_TEST_RUNNER_FORKS)
+with_fulu_and_later = with_all_phases_from(FULU, all_phases=ALL_PHASES)
+with_gloas_and_later = with_all_phases_from(GLOAS, all_phases=ALL_PHASES)
+with_heze_and_later = with_all_phases_from(HEZE, all_phases=ALL_PHASES)
+with_eip8025_and_later = with_all_phases_from(EIP8025, all_phases=ALL_PHASES)
+with_eip8148_and_later = with_all_phases_from(EIP8148, all_phases=ALL_PHASES)
+with_eip8205_and_later = with_all_phases_from(EIP8205, all_phases=ALL_PHASES)
+with_eip8321_and_later = with_all_phases_from(EIP8321, all_phases=ALL_PHASES)
+with_eip8453_and_later = with_all_phases_from(EIP8453, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 
 with_bellatrix_only = with_phases([BELLATRIX])
 with_electra_only = with_phases([ELECTRA])
