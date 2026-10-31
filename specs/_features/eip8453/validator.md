@@ -17,12 +17,19 @@
     - [Preparing for a `BeaconBlock`](#preparing-for-a-beaconblock)
     - [Constructing the `BeaconBlockBody`](#constructing-the-beaconblockbody)
       - [Head votes](#head-votes)
+        - [Aggregate selection](#aggregate-selection)
+      - [Safe votes](#safe-votes)
       - [Attestations](#attestations)
       - [Attester slashings](#attester-slashings)
   - [Head voting](#head-voting)
     - [Head vote data](#head-vote-data)
     - [Construct head vote](#construct-head-vote)
     - [Broadcast head vote](#broadcast-head-vote)
+  - [Safe voting](#safe-voting)
+    - [Safe vote assignment](#safe-vote-assignment)
+    - [Safe vote data](#safe-vote-data)
+    - [Construct safe vote](#construct-safe-vote)
+    - [Broadcast safe vote](#broadcast-safe-vote)
   - [Attesting](#attesting)
     - [Attestation data](#attestation-data)
       - [Finality pair](#finality-pair)
@@ -33,10 +40,19 @@
     - [Broadcast attestation](#broadcast-attestation)
   - [Attestation aggregation](#attestation-aggregation)
     - [Aggregation selection](#aggregation-selection)
+      - [Head vote aggregation selection](#head-vote-aggregation-selection)
+      - [Safe vote aggregation selection](#safe-vote-aggregation-selection)
+      - [FG attestation aggregation selection](#fg-attestation-aggregation-selection)
     - [Construct aggregate](#construct-aggregate)
       - [Head votes](#head-votes-1)
+      - [Safe vote aggregation](#safe-vote-aggregation)
       - [FG attestations](#fg-attestations)
       - [Aggregation bits](#aggregation-bits)
+    - [Aggregate wrappers](#aggregate-wrappers)
+      - [New `HeadVoteAggregateAndProof`](#new-headvoteaggregateandproof)
+      - [New `SignedHeadVoteAggregateAndProof`](#new-signedheadvoteaggregateandproof)
+      - [New `SafeVoteAggregateAndProof`](#new-safevoteaggregateandproof)
+      - [New `SignedSafeVoteAggregateAndProof`](#new-signedsafevoteaggregateandproof)
     - [Broadcast aggregate](#broadcast-aggregate)
 
 <!-- mdformat-toc end -->
@@ -63,8 +79,15 @@ All terminology, constants, functions, and protocol mechanics defined in
 [EIP-8453 -- The Beacon Chain](./beacon-chain.md) are requisite for this
 document and used throughout.
 
-*TODO*: Specify the EIP-8453 fork-choice interfaces and duty deadlines
-referenced below.
+Each duty reads the [fork choice](./fork-choice.md) exactly once, at its
+deadline:
+
+| Duty           | Deadline                                                  | Fork-choice read                                 |
+| -------------- | --------------------------------------------------------- | ------------------------------------------------ |
+| Proposal       | start of the slot                                         | `get_ac_proposal(store)`                         |
+| Head vote      | `get_head_vote_due_ms()` into the slot                    | `get_ac_vote_head(store)`                        |
+| Safe vote      | `get_head_vote_due_ms()` into the assigned sub-round slot | `get_safe_vote_node(store)`                      |
+| FG attestation | `get_attestation_due_ms()` into the committee's slot      | `get_fg_target_source`, `get_fg_finality_source` |
 
 ## Helpers
 
@@ -155,8 +178,13 @@ Assignments are computed from the chain state using `get_attestation_committee`
 and `get_head_vote_committee`. A validator should recompute its assignment when
 the dependent chain state changes.
 
-*TODO*: Specify assignment lookahead and the dependent root in the EIP-8453
-fork-choice and networking specifications.
+Assignments are read from the finalized chain, matching the fork choice's
+[`record_head_vote_committee`](./fork-choice.md#new-record_head_vote_committee)
+accounting over
+[`get_head_vote_committee`](./beacon-chain.md#new-get_head_vote_committee): the
+dependent root is the latest finalized block root, and the state's
+`head_vote_committee_window` provides `MIN_SEED_LOOKAHEAD` epochs of lookahead.
+A validator recomputes its assignments when the finalized block changes.
 
 ## Beacon chain responsibilities
 
@@ -172,8 +200,18 @@ slot during which `is_proposer(state, validator_index)` returns `True`.
 Let `parent` be the block returned by the AC proposal procedure, together with
 its previous slot head-vote view.
 
-*TODO*: Specify the EIP-8453 proposal helper, including full or empty execution
-payload selection and inclusion-list checks.
+The AC proposal procedure selects the parent at the start of the slot:
+
+- Let `head, vote_messages, support_indices = get_ac_proposal(store)`: the walk
+  over the previous slot's votes in the proposer's full view. The proposer
+  applies no view freeze; it uses every previous-slot vote it holds, and
+  publishes that view through the block's head votes and support bits, built
+  from `vote_messages` and `support_indices`.
+- Build on `head`: the walk returns the full or empty parent node directly, and
+  `get_ac_proposal` converts a pending same-slot result to the empty node for
+  construction.
+- Execution payload bid selection and inclusion-list handling are inherited from
+  [Heze](../../heze/validator.md).
 
 #### Constructing the `BeaconBlockBody`
 
@@ -199,8 +237,42 @@ whose slot is no later than the vote's slot. Otherwise, clear the bit.
 *Note*: A vote for an unknown block may be included with its support bits
 cleared.
 
-*TODO*: Specify aggregate selection when the proposal view exceeds
-`MAX_HEAD_VOTES`, preserving the requirements of view merge.
+###### Aggregate selection
+
+When the proposal view holds more distinct previous-slot vote data values than
+`MAX_HEAD_VOTES`, the proposer packs greedily by displacement cost:
+
+1. Form one aggregate per distinct previous-slot `HeadVoteData` value, each
+   covering every voter of that data in the proposal view.
+2. Give priority to each aggregate that completes an *equivocation pair* — the
+   second distinct vote of a validator whose other vote is already included —
+   since it flips that validator from supporting one branch to counting against
+   every branch.
+3. Fill the remaining space with the previous-slot aggregates in descending
+   order of committee seats covered, then with older-epoch votes that add seats
+   for the block of their slot, which weigh builder payments.
+
+Packing the largest groups first is not for their own benefit — every voter
+already holds the majority groups — but to price out displacement: evicting an
+aggregate covering `s` seats requires `MAX_HEAD_VOTES` larger groups, so more
+than `MAX_HEAD_VOTES * s` adversarial seats, and the honest majority's
+aggregates can never be displaced. Honest votes for the same head share one
+aggregate, so honest convergence never contends for space.
+
+*Note*: Omission is bounded, not eliminated: an adversary spending seats on
+distinct data values can still push the smallest groups below the cut, and the
+walk's strict-majority eligibility has no slack to absorb the resulting view
+divergence. Quantifying the omission bound against the committee's honest
+majority — or adding threshold slack that absorbs it — remains open analysis.
+
+##### Safe votes
+
+Set `block.body.safe_votes` to aggregates from the safe vote pool, up to
+`MAX_SAFE_VOTES`. Each aggregate must satisfy the verification conditions in
+[`process_safe_vote`](./beacon-chain.md#new-process_safe_vote). A proposer
+should prefer aggregates that add voters within the expiry window, and should
+include a validator's second distinct vote of a round when it holds one, since
+the fork choice reads equivocations.
 
 ##### Attestations
 
@@ -229,12 +301,18 @@ position in block processing.
 A validator on the head vote committee of `slot` creates, signs and broadcasts a
 `HeadVoteMessage` for that slot.
 
-*Note*: In the Goldilocks schedule, head voting occurs one quarter of the way
-through the slot, after unlocking against the previous slot's votes. The
-validator must satisfy the fork choice's observation requirement after waking
-up.
+*Note*: Head voting occurs one quarter of the way through the slot, after
+reconciling with the previous slot's votes as published by the slot's proposals
+(view merge). A validator that has just started or finished syncing must observe
+one complete slot before voting: it cannot reconcile against votes it was not
+online to receive.
 
-*TODO*: Specify the EIP-8453 head-vote deadline and voting helper.
+The head-vote deadline is `get_head_vote_due_ms()` into the slot. At the
+deadline, the validator obtains its head from
+[`get_ac_vote_head`](./fork-choice.md#new-get_ac_vote_head), which merges the
+frozen local view with the views published by the slot's proposals and walks the
+voter's viable subtree of the FG frame; the stabilization layer constrains the
+walk through its [lock](./fork-choice.md#new-update_sg_lock).
 
 #### Head vote data
 
@@ -277,14 +355,85 @@ another head for the same slot.
 The validator broadcasts `head_vote_message` on the global `head_vote`
 [topic](./p2p-interface.md#new-head_vote) and processes it locally.
 
+### Safe voting
+
+Every active validator creates, signs and broadcasts one `SafeVoteMessage` per
+round, in its assigned sub-round.
+
+#### Safe vote assignment
+
+Safe votes are cast across the first `SLOTS_PER_ROUND - 2` slots of the round,
+after the round's grades complete and early enough that every vote arrives
+before the next round's earliest grade cutoff. The assignment is a pure function
+of the validator index: it schedules bandwidth and carries no other meaning.
+
+```python
+def compute_safe_vote_sub_round(validator_index: ValidatorIndex) -> Uint64:
+    return Uint64(validator_index) % (Uint64(SLOTS_PER_ROUND) - 2)
+```
+
+A validator casts its safe vote for `round` one quarter of the way through slot
+`compute_start_slot_at_round(round) + compute_safe_vote_sub_round(validator_index)`.
+
+*Note*: When the validator's attestation committee slot falls in the same
+sub-round, the safe vote and the FG attestation may share a transport envelope;
+bundling is a networking optimization with no consensus meaning.
+
+#### Safe vote data
+
+First, the validator constructs `safe_vote_data`, a
+[`SafeVoteData`](./beacon-chain.md#new-safevotedata) object:
+
+- Let `node` be the node returned by the fork choice's safe-vote selection,
+  [`get_safe_vote_node`](./fork-choice.md#new-get_safe_vote_node), which applies
+  the grade-0 veto between the anchor and the confirmed node.
+- Set `safe_vote_data.round` to the current round.
+- Set `safe_vote_data.beacon_block_root = node.root`.
+- Set `safe_vote_data.payload_status = node.payload_status`.
+
+#### Construct safe vote
+
+The validator creates `safe_vote_message` as a
+[`SafeVoteMessage`](./beacon-chain.md#new-safevotemessage):
+
+- Set `safe_vote_message.validator_index = validator_index`.
+- Set `safe_vote_message.data = safe_vote_data`.
+- Set `safe_vote_message.signature` to
+  `get_safe_vote_signature(state, safe_vote_data, privkey)`.
+
+```python
+def get_safe_vote_signature(state: BeaconState, data: SafeVoteData, privkey: int) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(data.round))
+    domain = get_domain(state, DOMAIN_SAFE_VOTE, epoch)
+    signing_root = compute_signing_root(data, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+The validator must record the selected node before signing and must not sign
+another safe vote for the same round.
+
+#### Broadcast safe vote
+
+The validator broadcasts `safe_vote_message` on the global `safe_vote`
+[topic](./p2p-interface.md#new-safe_vote) and processes it locally.
+
 ### Attesting
 
 A validator attempts to create an FG attestation in the slot of its attestation
 committee using the rules below. It sends no new attestation if there is no FG
 source or if its signing history suppresses the vote.
 
-*TODO*: Specify the FG attestation deadline and source observation for each
-assigned slot and staggered committee schedule.
+*Note*: A height pair is emitted only in rounds where
+[`has_fresh_safe_quorum`](./fork-choice.md#new-has_fresh_safe_quorum) holds —
+the stabilization layer's fresh quorum evidence. Without it, the attestation
+carries its finality pair alone.
+
+The FG attestation deadline is `get_attestation_due_ms()` into the committee's
+assigned slot. At the deadline, the validator takes a single observation of the
+fork choice — the source below through
+[`get_fg_target_source`](./fork-choice.md#new-get_fg_target_source) and the head
+through [`get_fg_finality_source`](./fork-choice.md#new-get_fg_finality_source)
+— so the pair rules read one consistent view.
 
 #### Attestation data
 
@@ -473,8 +622,63 @@ signers cannot be combined by adding their signatures.
 
 #### Aggregation selection
 
-*TODO*: Specify aggregator selection for head votes and FG attestations. The
-legacy aggregation helpers require adaptation to EIP-8453 committees.
+Aggregators self-select with a selection proof, as in prior upgrades: a
+validator is an aggregator when the hash of its proof clears a modulo chosen to
+yield `TARGET_AGGREGATORS_PER_COMMITTEE` expected aggregators per group. The
+groups are the slot's head vote committee, the sub-round's safe voters, and the
+round's attestation committee, each with its own proof domain so one signature
+never serves two roles.
+
+```python
+def is_selected_aggregator(selection_proof: BLSSignature, members: Uint64) -> bool:
+    modulo = max(1, members // TARGET_AGGREGATORS_PER_COMMITTEE)
+    return bytes_to_uint64(sha256(selection_proof)[0:8]) % modulo == 0
+```
+
+##### Head vote aggregation selection
+
+A member of the slot's head vote committee is an aggregator for the slot when
+`is_selected_aggregator(proof, HEAD_VOTE_COMMITTEE_SIZE)` holds for its proof. A
+validator holding several seats gets no additional selection chances.
+
+```python
+def get_head_vote_aggregator_proof(state: BeaconState, slot: Slot, privkey: int) -> BLSSignature:
+    domain = get_domain(state, DOMAIN_HEAD_VOTE_AGGREGATOR, compute_epoch_at_slot(slot))
+    signing_root = compute_signing_root(slot, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+##### Safe vote aggregation selection
+
+An active validator is a safe vote aggregator for the round when
+`is_selected_aggregator(proof, members)` holds for its proof, where `members` is
+the number of active validators assigned to its sub-round,
+`len(get_active_validator_indices(state, epoch)) // (SLOTS_PER_ROUND - 2)`.
+
+```python
+def get_safe_vote_aggregator_proof(state: BeaconState, round: Round, privkey: int) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(round))
+    domain = get_domain(state, DOMAIN_SAFE_VOTE_AGGREGATOR, epoch)
+    signing_root = compute_signing_root(round, domain)
+    return bls.Sign(privkey, signing_root)
+```
+
+##### FG attestation aggregation selection
+
+A member of an attestation committee is an aggregator for the round when
+`is_selected_aggregator(proof, members)` holds for its proof, where `members` is
+its committee's size. A validator sits on one committee per round, so the proof
+signs the round alone.
+
+```python
+def get_attestation_aggregator_proof(
+    state: BeaconState, round: Round, privkey: int
+) -> BLSSignature:
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(round))
+    domain = get_domain(state, DOMAIN_ATTESTATION_AGGREGATOR, epoch)
+    signing_root = compute_signing_root(round, domain)
+    return bls.Sign(privkey, signing_root)
+```
 
 #### Construct aggregate
 
@@ -502,6 +706,32 @@ def get_aggregate_head_vote(state: BeaconState, messages: Sequence[HeadVoteMessa
     voter_indices = sorted(signatures)
     return HeadVote(
         voter_indices=HeadVoteCommitteeIndices(data=voter_indices),
+        data=data,
+        signature=bls.Aggregate([signatures[index] for index in voter_indices]),
+    )
+```
+
+##### Safe vote aggregation
+
+Construct `aggregate_safe_vote` using `get_aggregate_safe_vote` with safe vote
+messages for the same round and node. Safe votes aggregate by value, regardless
+of attestation committees: in good times, the round's votes collapse into a few
+aggregates.
+
+```python
+def get_aggregate_safe_vote(messages: Sequence[SafeVoteMessage]) -> SafeVote:
+    """
+    Return the aggregate safe vote for the ``messages`` of one round and node.
+    """
+    assert len(messages) > 0
+    data = messages[0].data
+    assert all(message.data == data for message in messages)
+    signatures = {message.validator_index: message.signature for message in messages}
+    assert len(signatures) == len(messages)
+
+    voter_indices = sorted(signatures)
+    return SafeVote(
+        voter_indices=SafeVoteIndices(data=voter_indices),
         data=data,
         signature=bls.Aggregate([signatures[index] for index in voter_indices]),
     )
@@ -575,13 +805,63 @@ def get_attestation_aggregation_bits(
     return aggregation_bits
 ```
 
+#### Aggregate wrappers
+
+Aggregates travel on gossip wrapped with the aggregator's identity and selection
+proof, and the wrapper is signed under `DOMAIN_AGGREGATE_AND_PROOF`. FG
+attestation aggregates reuse the inherited `AggregateAndProof` and
+`SignedAggregateAndProof` containers; head votes and safe votes get their own.
+
+##### New `HeadVoteAggregateAndProof`
+
+```python
+class HeadVoteAggregateAndProof(Container):
+    aggregator_index: ValidatorIndex
+    aggregate: HeadVote
+    selection_proof: BLSSignature
+```
+
+##### New `SignedHeadVoteAggregateAndProof`
+
+```python
+class SignedHeadVoteAggregateAndProof(Container):
+    message: HeadVoteAggregateAndProof
+    signature: BLSSignature
+```
+
+##### New `SafeVoteAggregateAndProof`
+
+```python
+class SafeVoteAggregateAndProof(Container):
+    aggregator_index: ValidatorIndex
+    aggregate: SafeVote
+    selection_proof: BLSSignature
+```
+
+##### New `SignedSafeVoteAggregateAndProof`
+
+```python
+class SignedSafeVoteAggregateAndProof(Container):
+    message: SafeVoteAggregateAndProof
+    signature: BLSSignature
+```
+
 #### Broadcast aggregate
 
-The validator broadcasts the aggregate for block inclusion.
+An aggregator broadcasts its wrapped aggregates on the matching topic and
+retains them for block inclusion:
 
-*TODO*: Specify aggregate gossip messages, selection-proof wrappers and
-broadcast deadlines. Gossip deduplication must use the data and signers, since
-the epoch is not signed.
+- Head vote aggregates by two quarters of the way through the vote's slot, on
+  `head_vote_aggregate`, so the next slot's proposer holds them in time for view
+  merge.
+- Safe vote aggregates by two quarters of the way through the aggregator's
+  sub-round slot, on `safe_vote_aggregate`, covering every vote of the round
+  seen so far, one aggregate per distinct `SafeVoteData`.
+- FG attestation aggregates at the inherited aggregate deadline of the
+  committee's slot, on `attestation_aggregate`.
+
+*Note*: Gossip deduplication must use the data and signers, since an FG
+aggregate's epoch is not signed.
 
 *Note*: An FG aggregate's epoch must be between
 `compute_epoch_at_slot(state.finalized_slot)` and `get_current_epoch(state)`,
