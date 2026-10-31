@@ -20,6 +20,7 @@ EIP8025 = SpecForkName("eip8025")
 EIP8148 = SpecForkName("eip8148")
 EIP8205 = SpecForkName("eip8205")
 EIP8321 = SpecForkName("eip8321")
+EIP8453 = SpecForkName("eip8453")
 
 #
 # SpecFork settings
@@ -45,9 +46,11 @@ ALL_PHASES = (
 # The forks that have light client specs
 LIGHT_CLIENT_TESTING_FORKS = [item for item in MAINNET_FORKS if item != PHASE0] + [GLOAS]
 # The forks that output to the test vectors.
-TESTGEN_FORKS = (*MAINNET_FORKS, GLOAS, HEZE)
+TESTGEN_FORKS = (*MAINNET_FORKS, GLOAS, HEZE, EIP8453)
 # Forks allowed in the test runner `--fork` flag, to fail fast in case of typos
-ALLOWED_TEST_RUNNER_FORKS = ALL_PHASES
+# EIP8453 rewrites earlier behavior, so it is excluded from `ALL_PHASES` to keep
+# inherited `with_X_and_later` tests off it, and added here for its own tests.
+ALLOWED_TEST_RUNNER_FORKS = (*ALL_PHASES, EIP8453)
 
 # NOTE: the same definition as in `pysetup/md_doc_paths.py`
 PREVIOUS_FORK_OF = {
@@ -66,6 +69,7 @@ PREVIOUS_FORK_OF = {
     EIP8148: HEZE,
     EIP8205: HEZE,
     EIP8321: HEZE,
+    EIP8453: HEZE,
 }
 
 # For fork transition tests
