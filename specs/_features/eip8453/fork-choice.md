@@ -1612,7 +1612,7 @@ layer above finality and one below the available chain.
 ```python
 def get_stable(store: Store) -> ForkChoiceNode:
     finalized_root = store.finalized_checkpoint.root
-    if is_ancestor_root(store, finalized_root, store.latest_stable.root):
+    if is_ancestor_root(store, store.latest_stable.root, finalized_root):
         return store.latest_stable
     return ForkChoiceNode(root=finalized_root, payload_status=PAYLOAD_STATUS_PENDING)
 ```
