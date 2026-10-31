@@ -55,6 +55,25 @@
     - [New `compute_confirmed_path_and_lock`](#new-compute_confirmed_path_and_lock)
     - [New `compute_fast_path_and_lock`](#new-compute_fast_path_and_lock)
     - [New `compute_slow_lock`](#new-compute_slow_lock)
+  - [Stabilization](#stabilization)
+    - [New `StoreSafeVote`](#new-storesafevote)
+    - [New `get_node_parent`](#new-get_node_parent)
+    - [New `get_window_safe_votes`](#new-get_window_safe_votes)
+    - [New `get_safe_vote_resolution_time_ms`](#new-get_safe_vote_resolution_time_ms)
+    - [New `safe_vote_covers`](#new-safe_vote_covers)
+    - [New `has_safe_vote_equivocation`](#new-has_safe_vote_equivocation)
+    - [New `supports_node`](#new-supports_node)
+    - [New `opposes_node`](#new-opposes_node)
+    - [New `has_relative_majority`](#new-has_relative_majority)
+    - [New `compute_graded_node`](#new-compute_graded_node)
+    - [New `update_grades`](#new-update_grades)
+    - [New `get_active_prefix`](#new-get_active_prefix)
+    - [New `get_sg_anchor`](#new-get_sg_anchor)
+    - [New `is_grade_0_compatible`](#new-is_grade_0_compatible)
+    - [New `get_stable_root`](#new-get_stable_root)
+    - [New `get_safe_vote_node`](#new-get_safe_vote_node)
+    - [New `advance_record`](#new-advance_record)
+    - [New `get_stable`](#new-get_stable)
   - [Store mutators](#store-mutators)
     - [New `update_finality`](#new-update_finality)
     - [New `add_lock`](#new-add_lock)
@@ -63,6 +82,9 @@
     - [New `record_payload_receipt_time`](#new-record_payload_receipt_time)
     - [New `record_head_vote_committee`](#new-record_head_vote_committee)
     - [New `record_head_vote_message`](#new-record_head_vote_message)
+    - [New `record_safe_vote`](#new-record_safe_vote)
+    - [New `update_sg_lock`](#new-update_sg_lock)
+    - [New `update_stable_record`](#new-update_stable_record)
   - [`on_tick` helpers](#on_tick-helpers)
     - [New `update_confirmation`](#new-update_confirmation)
     - [New `unlock`](#new-unlock)
@@ -73,10 +95,15 @@
   - [Modified `on_block`](#modified-on_block)
   - [Modified `on_execution_payload_envelope`](#modified-on_execution_payload_envelope)
   - [New `on_head_vote_message`](#new-on_head_vote_message)
+  - [New `on_safe_vote`](#new-on_safe_vote)
 - [Internal API](#internal-api)
   - [New `get_ac_proposal`](#new-get_ac_proposal)
   - [New `get_ac_vote_head`](#new-get_ac_vote_head)
   - [New `get_ac_frame`](#new-get_ac_frame)
+  - [FG attestation sources](#fg-attestation-sources)
+    - [New `get_fg_target_source`](#new-get_fg_target_source)
+    - [New `get_fg_finality_source`](#new-get_fg_finality_source)
+    - [New `has_fresh_safe_quorum`](#new-has_fresh_safe_quorum)
   - [New `get_confirmed_execution_block_hash`](#new-get_confirmed_execution_block_hash)
 - [External API](#external-api)
   - [New `get_confirmed_node`](#new-get_confirmed_node)
@@ -157,6 +184,14 @@ class Store:
     head_vote_messages: dict[Slot, list[HeadVoteMessage]]
     head_vote_message_receipt_times: dict[Root, Uint64]
     head_vote_committees: dict[Slot, HeadVoteCommittee]
+    safe_votes: dict[Round, list[StoreSafeVote]]
+    grade_2: ForkChoiceNode | None
+    grade_1: ForkChoiceNode | None
+    grade_0: ForkChoiceNode | None
+    grade_2_round: Round
+    grade_1_round: Round
+    grade_0_round: Round
+    latest_stable: ForkChoiceNode
 ```
 
 ### Modified `get_forkchoice_store`
@@ -205,6 +240,16 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         head_vote_messages={},
         head_vote_message_receipt_times={},
         head_vote_committees={},
+        safe_votes={},
+        grade_2=None,
+        grade_1=None,
+        grade_0=None,
+        grade_2_round=GENESIS_ROUND,
+        grade_1_round=GENESIS_ROUND,
+        grade_0_round=GENESIS_ROUND,
+        latest_stable=ForkChoiceNode(
+            root=finalized_checkpoint.root, payload_status=PAYLOAD_STATUS_PENDING
+        ),
     )
 ```
 
@@ -1173,6 +1218,405 @@ def compute_slow_lock(
     return slow_lock
 ```
 
+### Stabilization
+
+The stabilization rule reads the safe votes of the expiry window — the rounds
+`[max(0, r − SAFE_VOTE_EXPIRY_ROUNDS), r)` — and weighs them with the FG
+validator weights. A validator *supports* a node when its latest vote resolved
+by the early cutoff covers the node and nothing it did by the late cutoff walks
+that back; it *opposes* the node when a later vote leaves the node's chain or an
+equivocation surfaces. A node holds a *relative majority* when supporting weight
+strictly exceeds opposing weight: there is no absolute threshold, so the test is
+meaningful at any participation level, and two conflicting nodes can never both
+hold it.
+
+*Note*: Weights are read from the latest finalized block's post-state, the same
+dependent state that fixes the head vote committees.
+
+#### New `StoreSafeVote`
+
+```python
+@dataclass(eq=True, frozen=True)
+class StoreSafeVote:
+    validator_index: ValidatorIndex
+    data: SafeVoteData
+    arrival_ms: Uint64
+```
+
+#### New `get_node_parent`
+
+```python
+def get_node_parent(store: Store, node: ForkChoiceNode) -> ForkChoiceNode | None:
+    if node.payload_status != PAYLOAD_STATUS_PENDING:
+        return ForkChoiceNode(root=node.root, payload_status=PAYLOAD_STATUS_PENDING)
+    block = store.blocks[node.root]
+    if block.parent_root not in store.blocks:
+        return None
+    return ForkChoiceNode(
+        root=block.parent_root,
+        payload_status=get_parent_payload_status(store, block),
+    )
+```
+
+#### New `get_window_safe_votes`
+
+```python
+def get_window_safe_votes(store: Store, round: Round) -> Sequence[StoreSafeVote]:
+    start = Round(round - min(round, SAFE_VOTE_EXPIRY_ROUNDS))
+    votes: list[StoreSafeVote] = []
+    for window_round in range(start, round):
+        if Round(window_round) in store.safe_votes:
+            votes.extend(store.safe_votes[Round(window_round)])
+    return votes
+```
+
+#### New `get_safe_vote_resolution_time_ms`
+
+*Note*: A safe vote resolves when the store holds its node's block and the block
+is compatible with the finalized block. A vote for a block conflicting with the
+finalized chain neither supports nor covers.
+
+```python
+def get_safe_vote_resolution_time_ms(store: Store, vote: StoreSafeVote) -> Uint64 | None:
+    root = vote.data.beacon_block_root
+    if root not in store.blocks:
+        return None
+    finalized_root = store.finalized_checkpoint.root
+    is_compatible = is_ancestor_root(store, finalized_root, root) or is_ancestor_root(
+        store, root, finalized_root
+    )
+    if not is_compatible:
+        return None
+    return max(vote.arrival_ms, store.block_receipt_times[root])
+```
+
+#### New `safe_vote_covers`
+
+```python
+def safe_vote_covers(store: Store, data: SafeVoteData, node: ForkChoiceNode) -> bool:
+    if data.beacon_block_root not in store.blocks:
+        return False
+    vote_node = ForkChoiceNode(root=data.beacon_block_root, payload_status=data.payload_status)
+    return is_ancestor(store, vote_node, node)
+```
+
+#### New `has_safe_vote_equivocation`
+
+*Note*: Whether `votes` holds two distinct votes of one round at or after round
+`round_floor` — the counter-evidence form of equivocation used by support and
+opposition.
+
+```python
+def has_safe_vote_equivocation(votes: Sequence[StoreSafeVote], round_floor: Round) -> bool:
+    seen: dict[Round, SafeVoteData] = {}
+    for vote in votes:
+        if vote.data.round < round_floor:
+            continue
+        if vote.data.round in seen:
+            if seen[vote.data.round] != vote.data:
+                return True
+        else:
+            seen[vote.data.round] = vote.data
+    return False
+```
+
+#### New `supports_node`
+
+```python
+def supports_node(
+    store: Store,
+    window: Sequence[StoreSafeVote],
+    early_ms: Uint64,
+    late_ms: Uint64,
+    validator_index: ValidatorIndex,
+    node: ForkChoiceNode,
+) -> bool:
+    own_votes = [vote for vote in window if vote.validator_index == validator_index]
+    received = [vote for vote in own_votes if vote.arrival_ms < late_ms]
+    early_resolved = []
+    late_resolved = []
+    for vote in own_votes:
+        resolution_ms = get_safe_vote_resolution_time_ms(store, vote)
+        if resolution_ms is None:
+            continue
+        if resolution_ms < early_ms:
+            early_resolved.append(vote)
+        if resolution_ms < late_ms:
+            late_resolved.append(vote)
+    if len(early_resolved) == 0:
+        return False
+    latest = max(early_resolved, key=lambda vote: vote.data.round)
+    if not safe_vote_covers(store, latest.data, node):
+        return False
+    if has_safe_vote_equivocation(received, latest.data.round):
+        return False
+    return all(
+        safe_vote_covers(store, vote.data, node)
+        for vote in late_resolved
+        if vote.data.round > latest.data.round
+    )
+```
+
+#### New `opposes_node`
+
+```python
+def opposes_node(
+    store: Store,
+    window: Sequence[StoreSafeVote],
+    early_ms: Uint64,
+    late_ms: Uint64,
+    validator_index: ValidatorIndex,
+    node: ForkChoiceNode,
+) -> bool:
+    own_votes = [vote for vote in window if vote.validator_index == validator_index]
+    received = [vote for vote in own_votes if vote.arrival_ms < late_ms]
+    early_rounds = []
+    late_resolved = []
+    for vote in own_votes:
+        resolution_ms = get_safe_vote_resolution_time_ms(store, vote)
+        if resolution_ms is None:
+            continue
+        if resolution_ms < early_ms:
+            early_rounds.append(vote.data.round)
+        if resolution_ms < late_ms:
+            late_resolved.append(vote)
+    round_floor = max(early_rounds) if len(early_rounds) > 0 else Round(0)
+    has_defection = any(
+        not safe_vote_covers(store, vote.data, node)
+        for vote in late_resolved
+        if vote.data.round >= round_floor
+    )
+    return has_defection or has_safe_vote_equivocation(received, round_floor)
+```
+
+#### New `has_relative_majority`
+
+```python
+def has_relative_majority(
+    store: Store, round: Round, early_ms: Uint64, late_ms: Uint64, node: ForkChoiceNode
+) -> bool:
+    window = get_window_safe_votes(store, round)
+    weight_state = store.block_states[store.finalized_checkpoint.root]
+    participants: set[ValidatorIndex] = set()
+    for vote in window:
+        if vote.arrival_ms < late_ms:
+            participants.add(vote.validator_index)
+    supporting_weight = Uint256(0)
+    opposing_weight = Uint256(0)
+    for validator_index in participants:
+        # A validator unknown to the weight state carries no weight
+        if validator_index >= len(weight_state.validators):
+            continue
+        weight = get_validator_weight(weight_state, validator_index)
+        if supports_node(store, window, early_ms, late_ms, validator_index, node):
+            supporting_weight += weight
+        elif opposes_node(store, window, early_ms, late_ms, validator_index, node):
+            opposing_weight += weight
+    return supporting_weight > opposing_weight
+```
+
+#### New `compute_graded_node`
+
+*Note*: The nodes holding a relative majority in one store lie on one chain, so
+the deepest of them is well defined; the slot orders depth, with the payload
+children of a block deeper than its pending node.
+
+```python
+def compute_graded_node(
+    store: Store, round: Round, early_ms: Uint64, late_ms: Uint64
+) -> ForkChoiceNode | None:
+    graded: list[ForkChoiceNode] = []
+    statuses = (PAYLOAD_STATUS_PENDING, PAYLOAD_STATUS_EMPTY, PAYLOAD_STATUS_FULL)
+    for root in store.blocks:
+        for payload_status in statuses:
+            node = ForkChoiceNode(root=root, payload_status=payload_status)
+            if has_relative_majority(store, round, early_ms, late_ms, node):
+                graded.append(node)
+    if len(graded) == 0:
+        return None
+    return max(
+        graded,
+        key=lambda node: (
+            store.blocks[node.root].slot,
+            Uint64(0) if node.payload_status == PAYLOAD_STATUS_PENDING else Uint64(1),
+            node.root,
+        ),
+    )
+```
+
+#### New `update_grades`
+
+*Note*: Each grade of each round is computed once, at or after its completion
+time. The cutoffs are receipt-time comparisons, so a completion evaluated late
+reads the same sets a timely one would have. A node that ticks sparsely skips
+the intervening rounds' grades rather than reconstructing them; the current
+round's grades are always evaluated.
+
+```python
+def update_grades(store: Store) -> None:
+    quarter_ms = get_head_vote_due_ms()
+    current_round = compute_round_at_slot(get_current_slot(store))
+    if current_round == GENESIS_ROUND:
+        return
+    start_ms = compute_time_at_slot_ms(
+        store.genesis_time_ms, compute_start_slot_at_round(current_round)
+    )
+    # Grade 2 of a round completes in the last quarter-slot of the previous
+    # round; a node that missed that tick evaluates it late
+    if store.grade_2_round < current_round:
+        store.grade_2 = compute_graded_node(
+            store,
+            current_round,
+            Uint64(start_ms - 5 * quarter_ms),
+            Uint64(start_ms - quarter_ms),
+        )
+        store.grade_2_round = current_round
+    next_round = Round(current_round + 1)
+    next_start_ms = compute_time_at_slot_ms(
+        store.genesis_time_ms, compute_start_slot_at_round(next_round)
+    )
+    if store.time_ms + quarter_ms >= next_start_ms and store.grade_2_round < next_round:
+        store.grade_2 = compute_graded_node(
+            store,
+            next_round,
+            Uint64(next_start_ms - 5 * quarter_ms),
+            Uint64(next_start_ms - quarter_ms),
+        )
+        store.grade_2_round = next_round
+    # Grade 1 completes at the round boundary
+    if store.grade_1_round < current_round:
+        store.grade_1 = compute_graded_node(
+            store,
+            current_round,
+            Uint64(start_ms - 4 * quarter_ms),
+            Uint64(start_ms - 2 * quarter_ms),
+        )
+        store.grade_1_round = current_round
+    # Grade 0 completes one quarter-slot into the round
+    if store.time_ms >= start_ms + quarter_ms and store.grade_0_round < current_round:
+        store.grade_0 = compute_graded_node(
+            store,
+            current_round,
+            Uint64(start_ms - 3 * quarter_ms),
+            Uint64(start_ms - 3 * quarter_ms),
+        )
+        store.grade_0_round = current_round
+```
+
+#### New `get_active_prefix`
+
+*Note*: A saved grade is *active* when it has an ancestor in the viable subtree
+of the FG frame, and its active prefix is the deepest such ancestor: the fork
+choice can use it, and it descends the forkchoice root.
+
+```python
+def get_active_prefix(
+    store: Store, fg_frame: FGFrame, node: ForkChoiceNode | None
+) -> ForkChoiceNode | None:
+    if node is None or node.root not in store.blocks:
+        return None
+    viable = get_viable_subtree(store, fg_frame, fg_frame.tree)
+    current: ForkChoiceNode | None = node
+    while current is not None:
+        if current in viable:
+            return current
+        current = get_node_parent(store, current)
+    return None
+```
+
+#### New `get_sg_anchor`
+
+*Note*: The stabilization anchor: the active prefix of the saved grade-1 node,
+and the forkchoice root when there is no grade-1 node or the root has passed it.
+It enters the head walk as a lock through `update_sg_lock` rather than by
+re-anchoring the walk.
+
+```python
+def get_sg_anchor(store: Store, fg_frame: FGFrame) -> ForkChoiceNode:
+    prefix = get_active_prefix(store, fg_frame, store.grade_1)
+    if prefix is not None:
+        return prefix
+    return fg_frame.forkchoice_root
+```
+
+#### New `is_grade_0_compatible`
+
+```python
+def is_grade_0_compatible(store: Store, node: ForkChoiceNode) -> bool:
+    veto = store.grade_0
+    if veto is None or veto.root not in store.blocks or node.root not in store.blocks:
+        return True
+    return is_compatible(store, node, veto)
+```
+
+#### New `get_stable_root`
+
+```python
+def get_stable_root(store: Store, fg_frame: FGFrame) -> ForkChoiceNode:
+    prefix = get_active_prefix(store, fg_frame, store.grade_2)
+    if prefix is not None:
+        return prefix
+    return fg_frame.forkchoice_root
+```
+
+#### New `get_safe_vote_node`
+
+*Note*: The node an honest validator names in its safe vote: the deepest
+grade-0-compatible node between the anchor and the confirmed node; the grade-2
+active prefix when there is none; the forkchoice root when grade 2 exists but
+the root has passed it; and the anchor as the final fallback, which keeps voting
+total.
+
+```python
+def get_safe_vote_node(store: Store) -> ForkChoiceNode:
+    fg_frame = get_fg_frame(store)
+    anchor = get_sg_anchor(store, fg_frame)
+    confirmed = get_confirmed_node(store)
+    if is_ancestor(store, confirmed, anchor):
+        current: ForkChoiceNode | None = confirmed
+        while current is not None:
+            if is_grade_0_compatible(store, current):
+                return current
+            if current == anchor:
+                break
+            current = get_node_parent(store, current)
+    grade_2_prefix = get_active_prefix(store, fg_frame, store.grade_2)
+    if grade_2_prefix is not None:
+        return grade_2_prefix
+    if store.grade_2 is not None:
+        return fg_frame.forkchoice_root
+    return anchor
+```
+
+#### New `advance_record`
+
+*Note*: This is the paper's `advance`: no candidate or an ancestor candidate
+leaves a record unchanged, while an extension or a conflicting candidate
+replaces it. This permits recovery from a conflicting record formed in an unsafe
+period.
+
+```python
+def advance_record(
+    store: Store, old: ForkChoiceNode, candidate: ForkChoiceNode | None
+) -> ForkChoiceNode:
+    if candidate is None or candidate == old or is_ancestor(store, old, candidate):
+        return old
+    return candidate
+```
+
+#### New `get_stable`
+
+*Note*: User-facing; no voting rule reads it. It backs the stable chain, one
+layer above finality and one below the available chain.
+
+```python
+def get_stable(store: Store) -> ForkChoiceNode:
+    finalized_root = store.finalized_checkpoint.root
+    if is_ancestor_root(store, finalized_root, store.latest_stable.root):
+        return store.latest_stable
+    return ForkChoiceNode(root=finalized_root, payload_status=PAYLOAD_STATUS_PENDING)
+```
+
 ### Store mutators
 
 #### New `update_finality`
@@ -1347,6 +1791,72 @@ def record_head_vote_message(store: Store, state: BeaconState, message: HeadVote
     record_head_vote_committee(store, state, message.data)
 ```
 
+#### New `record_safe_vote`
+
+*Note*: This is the paper's `on_sg_vote`. The pool keeps votes of the rounds in
+the expiry window, accepts each vote at most once, and keeps at most two votes
+with distinct data per validator per round — the second is equivocation
+evidence, and all any rule reads. Active-validator membership is a gossip and
+state-transition concern. A refused vote is not consumed: a later delivery may
+be admitted after the guard changes.
+
+```python
+def record_safe_vote(store: Store, validator_index: ValidatorIndex, data: SafeVoteData) -> None:
+    current_round = compute_round_at_slot(get_current_slot(store))
+    if data.round > current_round:
+        return
+    if data.round + SAFE_VOTE_EXPIRY_ROUNDS < current_round:
+        return
+    if data.round not in store.safe_votes:
+        store.safe_votes[data.round] = []
+    votes = store.safe_votes[data.round]
+    distinct: list[SafeVoteData] = []
+    for vote in votes:
+        if vote.validator_index != validator_index:
+            continue
+        if vote.data == data:
+            return
+        if vote.data not in distinct:
+            distinct.append(vote.data)
+    if len(distinct) >= 2:
+        return
+    votes.append(
+        StoreSafeVote(validator_index=validator_index, data=data, arrival_ms=store.time_ms)
+    )
+```
+
+#### New `update_sg_lock`
+
+*Note*: The stabilization layer's lock producer: the active prefix of the saved
+grade-1 node joins the lock set beside the fast and slow confirmation locks. The
+deadline spans the grade's own round, so a round whose grade does not resolve
+lets the lock expire rather than renewing it.
+
+```python
+def update_sg_lock(store: Store) -> None:
+    fg_frame = get_fg_frame(store)
+    prefix = get_active_prefix(store, fg_frame, store.grade_1)
+    if prefix is None:
+        return
+    deadline = (
+        compute_time_at_slot_ms(
+            store.genesis_time_ms,
+            compute_start_slot_at_round(Round(store.grade_1_round + 1)),
+        )
+        + get_head_vote_due_ms()
+    )
+    add_lock(store, deadline, prefix)
+```
+
+#### New `update_stable_record`
+
+```python
+def update_stable_record(store: Store) -> None:
+    fg_frame = get_fg_frame(store)
+    candidate = get_stable_root(store, fg_frame)
+    store.latest_stable = advance_record(store, store.latest_stable, candidate)
+```
+
 ### `on_tick` helpers
 
 #### New `update_confirmation`
@@ -1506,6 +2016,11 @@ def on_tick(store: Store, time_ms: Uint64) -> None:
 
     # Update store time
     store.time_ms = time_ms
+
+    # Evaluate the stabilization grades, lock and record due by this tick
+    update_grades(store)
+    update_sg_lock(store)
+    update_stable_record(store)
 ```
 
 ### Modified `on_block`
@@ -1565,6 +2080,11 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # [New in EIP8453]
     for vote in block.body.head_votes:
         record_head_vote_committee(store, state, vote.data)
+
+    # Record the safe votes the block carries
+    for safe_vote in block.body.safe_votes:
+        for validator_index in safe_vote.voter_indices:
+            record_safe_vote(store, validator_index, safe_vote.data)
 
     # Notify the store about the payload_attestations in the block
     notify_ptc_messages(store, state, block.body.payload_attestations)
@@ -1635,6 +2155,24 @@ def on_head_vote_message(store: Store, message: HeadVoteMessage) -> None:
 
     # Record the message
     record_head_vote_message(store, state, message)
+```
+
+### New `on_safe_vote`
+
+*Note*: Run upon receiving a `SafeVoteMessage` on the wire, or upon decomposing
+a `SafeVote` aggregate into its voters. Signature and membership verification
+are gossip concerns, specified in the networking guide; the state transition
+re-verifies the votes a block carries.
+
+```python
+def on_safe_vote(store: Store, message: SafeVoteMessage) -> None:
+    data = message.data
+    assert data.payload_status in (
+        PAYLOAD_STATUS_EMPTY,
+        PAYLOAD_STATUS_FULL,
+        PAYLOAD_STATUS_PENDING,
+    )
+    record_safe_vote(store, message.validator_index, data)
 ```
 
 ## Internal API
@@ -1773,6 +2311,52 @@ def get_ac_frame(store: Store) -> tuple[ForkChoiceNode | None, ForkChoiceNode]:
         return fg_confirmed, head
     else:
         return None, head
+```
+
+### FG attestation sources
+
+The FG reads two things back from the available chain. The *target source* is
+the confirmed node: a target vote can create a justification, and only confirmed
+blocks may be justified. The *finality source* is the head: its subject is
+already justified, so it may read an unconfirmed chain, and the head chain state
+holds the freshest justification. The validator guide builds `AttestationData`
+from these two states together with the validator's signing record; the record
+itself belongs to the validator client and is out of scope here.
+
+#### New `get_fg_target_source`
+
+```python
+def get_fg_target_source(store: Store) -> BeaconState:
+    return store.block_states[get_confirmed_node(store).root]
+```
+
+#### New `get_fg_finality_source`
+
+```python
+def get_fg_finality_source(store: Store) -> BeaconState:
+    head = get_head(store)
+    return store.block_states[head.root]
+```
+
+#### New `has_fresh_safe_quorum`
+
+*Note*: A validator emits a height pair only in rounds whose grade-2 node is
+compatible with the forkchoice root — fresh quorum evidence from the
+stabilization layer. Without it, the attestation carries its finality pair
+alone. The test is compatibility, not an active prefix: heights advance per
+block while grades resolve per round, so on a healthy chain the grade trails the
+justified root as its ancestor. Requiring the grade to descend the forkchoice
+root would withhold height pairs until a timeout lowered the root back to the
+finalized checkpoint, degrading justification to an oscillation at timeout
+speed.
+
+```python
+def has_fresh_safe_quorum(store: Store) -> bool:
+    grade = store.grade_2
+    if grade is None or grade.root not in store.blocks:
+        return False
+    fg_root = get_fg_frame(store).forkchoice_root
+    return is_compatible(store, grade, fg_root)
 ```
 
 ### New `get_confirmed_execution_block_hash`
