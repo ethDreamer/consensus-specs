@@ -20,6 +20,8 @@
   - [New `HeightParticipation`](#new-heightparticipation)
   - [New `LegacyAttesterSlashings`](#new-legacyattesterslashings)
   - [New `PendingFinalities`](#new-pendingfinalities)
+  - [New `SafeVoteIndices`](#new-safevoteindices)
+  - [New `SafeVotes`](#new-safevotes)
   - [New `Round`](#new-round)
   - [New `RoundParticipation`](#new-roundparticipation)
 - [Constants](#constants)
@@ -31,6 +33,7 @@
   - [Finality gadget](#finality-gadget)
   - [Rounds](#rounds)
   - [Head votes](#head-votes)
+  - [Safe votes](#safe-votes)
   - [Rewards](#rewards)
   - [Inactivity leak](#inactivity-leak)
   - [Max operations per block](#max-operations-per-block)
@@ -40,6 +43,9 @@
   - [New `HeadVoteData`](#new-headvotedata)
   - [New `HeadVote`](#new-headvote)
   - [New `HeadVoteMessage`](#new-headvotemessage)
+  - [New `SafeVoteData`](#new-safevotedata)
+  - [New `SafeVote`](#new-safevote)
+  - [New `SafeVoteMessage`](#new-safevotemessage)
   - [Modified `AttestationData`](#modified-attestationdata)
   - [Modified `SingleAttestation`](#modified-singleattestation)
   - [Modified `Attestation`](#modified-attestation)
@@ -85,6 +91,7 @@
     - [New `get_participating_weight`](#new-get_participating_weight)
     - [Modified `get_finality_delay`](#modified-get_finality_delay)
     - [New `get_round_base_reward`](#new-get_round_base_reward)
+    - [New `get_head_vote_seat_reward`](#new-get_head_vote_seat_reward)
     - [New `get_flag_index_rewards`](#new-get_flag_index_rewards)
   - [Beacon state mutators](#beacon-state-mutators)
     - [New `add_participation_flag`](#new-add_participation_flag)
@@ -113,6 +120,8 @@
         - [Modified `process_attestation`](#modified-process_attestation)
       - [Head votes](#head-votes-1)
         - [New `process_head_vote`](#new-process_head_vote)
+      - [Safe votes](#safe-votes-1)
+        - [New `process_safe_vote`](#new-process_safe_vote)
     - [Height events](#height-events)
       - [New `process_height_events`](#new-process_height_events)
       - [New `advance_height`](#new-advance_height)
@@ -145,6 +154,13 @@ current epochs and records which of the previous slot's votes the proposer
 counted as support. The state transition records which seats voted for the block
 of their slot, which weighs builder payments.
 
+Once per round, every active validator also casts a safe vote, naming the block
+it considers confirmed. Safe votes stabilize the available chain's fork choice
+across rounds: they are read off-chain, by the stabilization rule of the
+[fork choice](./fork-choice.md). Blocks relay them for view merge, and the state
+transition verifies them and credits a participation flag, recording nothing
+else.
+
 Validators cast FG attestations in rounds of `SLOTS_PER_ROUND` slots. A round is
 to the FG what an epoch is to Casper FFG: each active validator attests once,
 and the FG settles rewards and inactivity at its end, in `process_round`. Once
@@ -173,7 +189,9 @@ validator's weight is proportional to its current effective balance, reduced by
 its inactivity score. Slashed validators count toward the total but not toward a
 quorum.
 
-*Note*: This upgrade does not yet specify rewards for head votes.
+*Note*: Head votes are paid per newly recorded seat, like sync committee
+participation, and safe votes through a participation flag; both are funded by
+reallocating the fixed reward budget, so total issuance is unchanged.
 
 *Note*: This specification is built upon [Heze](../../heze/beacon-chain.md).
 
@@ -329,6 +347,24 @@ class PendingFinalities(List[PendingFinality]):
     LIMIT = PENDING_FINALITY_WINDOW
 ```
 
+### New `SafeVoteIndices`
+
+```python
+class SafeVoteIndices(ProgressiveList[ValidatorIndex]):
+    """
+    The indices of the validators participating in a safe vote.
+    """
+```
+
+### New `SafeVotes`
+
+```python
+class SafeVotes(ProgressiveList[SafeVote]):
+    """
+    The safe votes in a beacon block.
+    """
+```
+
 ### New `Round`
 
 ```python
@@ -353,47 +389,67 @@ class RoundParticipation(ProgressiveList[ParticipationFlags]):
 
 ### Participation flag indices
 
-| Name                  | Value       |
-| --------------------- | ----------- |
-| `PROGRESS_FLAG_INDEX` | `Uint64(0)` |
-| `FINALITY_FLAG_INDEX` | `Uint64(1)` |
+| Name                   | Value       |
+| ---------------------- | ----------- |
+| `PROGRESS_FLAG_INDEX`  | `Uint64(0)` |
+| `FINALITY_FLAG_INDEX`  | `Uint64(1)` |
+| `SAFE_VOTE_FLAG_INDEX` | `Uint64(2)` |
 
 ### Incentivization weights
 
-| Name              | Value        |
-| ----------------- | ------------ |
-| `PROGRESS_WEIGHT` | `Uint64(40)` |
-| `FINALITY_WEIGHT` | `Uint64(14)` |
+| Name               | Value        |
+| ------------------ | ------------ |
+| `PROGRESS_WEIGHT`  | `Uint64(32)` |
+| `FINALITY_WEIGHT`  | `Uint64(12)` |
+| `SAFE_VOTE_WEIGHT` | `Uint64(6)`  |
+| `HEAD_VOTE_WEIGHT` | `Uint64(4)`  |
 
-*Note*: The progress flag takes the Altair weights of the source and target
-flags, and the finality flag takes the weight of the head flag, so the sum of
-the weights still equals `WEIGHT_DENOMINATOR`.
+*Note*: Total issuance is unchanged: the two new duties are paid by reallocating
+the fixed `WEIGHT_DENOMINATOR` budget, so the weights above plus the inherited
+sync and proposer weights still sum to `WEIGHT_DENOMINATOR`. The split between
+duties is a placeholder pending incentive analysis; the ratios are security
+parameters, not bookkeeping.
 
 ### Domains
 
-| Name                         | Value                      |
-| ---------------------------- | -------------------------- |
-| `DOMAIN_HEAD_VOTE`           | `DomainType("0x12000000")` |
-| `DOMAIN_HEAD_VOTE_COMMITTEE` | `DomainType("0x13000000")` |
-| `DOMAIN_FINALITY_ATTESTER`   | `DomainType("0x14000000")` |
+| Name                            | Value                      |
+| ------------------------------- | -------------------------- |
+| `DOMAIN_HEAD_VOTE`              | `DomainType("0x12000000")` |
+| `DOMAIN_HEAD_VOTE_COMMITTEE`    | `DomainType("0x13000000")` |
+| `DOMAIN_FINALITY_ATTESTER`      | `DomainType("0x14000000")` |
+| `DOMAIN_SAFE_VOTE`              | `DomainType("0x15000000")` |
+| `DOMAIN_HEAD_VOTE_AGGREGATOR`   | `DomainType("0x16000000")` |
+| `DOMAIN_SAFE_VOTE_AGGREGATOR`   | `DomainType("0x17000000")` |
+| `DOMAIN_ATTESTATION_AGGREGATOR` | `DomainType("0x18000000")` |
 
 ### Misc
 
-| Name                                 | Value                                |
-| ------------------------------------ | ------------------------------------ |
-| `GENESIS_ROUND`                      | `Round(0)`                           |
-| `TIMEOUT_DELAY_SLOTS`                | `SLOTS_PER_ROUND`                    |
-| `PARTICIPATION_FLAG_WEIGHTS_EIP8453` | `[PROGRESS_WEIGHT, FINALITY_WEIGHT]` |
+*Note*: The timeout delay is two rounds: target votes of one round are assumed
+to reach every honest store by the end of the next round, so a timeout may not
+be used to leave a height before the target votes cast at that height have had
+time to arrive. The safety and liveness results of the decoupled consensus paper
+are proved for delays of at least two rounds.
+
+| Name                                 | Value                                                  |
+| ------------------------------------ | ------------------------------------------------------ |
+| `GENESIS_ROUND`                      | `Round(0)`                                             |
+| `TIMEOUT_DELAY_SLOTS`                | `Slot(2 * SLOTS_PER_ROUND)`                            |
+| `PARTICIPATION_FLAG_WEIGHTS_EIP8453` | `[PROGRESS_WEIGHT, FINALITY_WEIGHT, SAFE_VOTE_WEIGHT]` |
 
 ## Presets
 
 ### Finality gadget
 
-| Name                      | Value                |
-| ------------------------- | -------------------- |
-| `PENDING_FINALITY_WINDOW` | `Uint64(2**2)` (= 4) |
-
 *Note*: `PENDING_FINALITY_WINDOW` must be at least 2.
+`NONJUSTIFIABLE_HEIGHT_PERIOD` must be at least 4 and `FINALITY_DEBT_THRESHOLD`
+at least 2: under finality debt, every `NONJUSTIFIABLE_HEIGHT_PERIOD`-th height
+advances without justifying, so healing never waits on a justification.
+
+| Name                           | Value                 |
+| ------------------------------ | --------------------- |
+| `PENDING_FINALITY_WINDOW`      | `Uint64(2**2)` (= 4)  |
+| `NONJUSTIFIABLE_HEIGHT_PERIOD` | `Uint64(2**6)` (= 64) |
+| `FINALITY_DEBT_THRESHOLD`      | `Uint64(2**1)` (= 2)  |
 
 ### Rounds
 
@@ -411,6 +467,16 @@ the weights still equals `WEIGHT_DENOMINATOR`.
 | Name                       | Value                     |
 | -------------------------- | ------------------------- |
 | `HEAD_VOTE_COMMITTEE_SIZE` | `Uint64(2**10)` (= 1,024) |
+
+### Safe votes
+
+*Note*: A safe vote of round `r` is read by the fork choice until round
+`r + SAFE_VOTE_EXPIRY_ROUNDS`, and a block may include it in the same window.
+This is the expiry window `η_SG` of the stabilization rule.
+
+| Name                      | Value               |
+| ------------------------- | ------------------- |
+| `SAFE_VOTE_EXPIRY_ROUNDS` | `Round(2**1)` (= 2) |
 
 ### Rewards
 
@@ -430,6 +496,7 @@ the weights still equals `WEIGHT_DENOMINATOR`.
 | Name             | Value                |
 | ---------------- | -------------------- |
 | `MAX_HEAD_VOTES` | `Uint64(2**3)` (= 8) |
+| `MAX_SAFE_VOTES` | `Uint64(2**2)` (= 4) |
 
 ## Containers
 
@@ -479,6 +546,44 @@ class HeadVote(ProgressiveContainer):
 class HeadVoteMessage(Container):
     validator_index: ValidatorIndex
     data: HeadVoteData
+    signature: BLSSignature
+```
+
+### New `SafeVoteData`
+
+*Note*: The safe vote names the fork-choice node, a block root and its payload
+status, that the validator considers confirmed in `round`. Honest validators
+vote the confirmed node reported by the fork choice. Safe votes from one
+validator naming two distinct nodes in one round are an equivocation, read by
+the fork choice and not slashable.
+
+```python
+class SafeVoteData(Container):
+    round: Round
+    beacon_block_root: Root
+    payload_status: PayloadStatus
+```
+
+### New `SafeVote`
+
+*Note*: A safe vote aggregate combines validators that name the same node in the
+same round, regardless of their attestation committees.
+
+```python
+class SafeVote(ProgressiveContainer):
+    ACTIVE_FIELDS = active_fields(width=3)
+
+    voter_indices: SafeVoteIndices
+    data: SafeVoteData
+    signature: BLSSignature
+```
+
+### New `SafeVoteMessage`
+
+```python
+class SafeVoteMessage(Container):
+    validator_index: ValidatorIndex
+    data: SafeVoteData
     signature: BLSSignature
 ```
 
@@ -556,7 +661,7 @@ upgrade and should be removed in a later upgrade.
 
 ```python
 class BeaconBlockBody(ProgressiveContainer):
-    ACTIVE_FIELDS = active_fields(width=16, gaps=(1, 6))
+    ACTIVE_FIELDS = active_fields(width=17, gaps=(1, 6))
 
     randao_reveal: BLSSignature
     graffiti: Bytes32
@@ -575,6 +680,8 @@ class BeaconBlockBody(ProgressiveContainer):
     head_vote_support: HeadVoteSupport
     # [New in EIP8453]
     legacy_attester_slashings: LegacyAttesterSlashings
+    # [New in EIP8453]
+    safe_votes: SafeVotes
 ```
 
 ### Modified `BeaconState`
@@ -585,7 +692,7 @@ keeps its name but moves to a new position.
 
 ```python
 class BeaconState(ProgressiveContainer):
-    ACTIVE_FIELDS = active_fields(width=57, gaps=(8, 9, 10, 15, 16, 17, 18, 19, 20, 28))
+    ACTIVE_FIELDS = active_fields(width=58, gaps=(8, 9, 10, 15, 16, 17, 18, 19, 20, 28))
 
     genesis_time: Uint64
     genesis_validators_root: Root
@@ -645,6 +752,8 @@ class BeaconState(ProgressiveContainer):
     target_slot: Slot
     # [New in EIP8453]
     finalized_slot: Slot
+    # [New in EIP8453]
+    nonjustifiable: Boolean
     # [New in EIP8453]
     target_participation: HeightParticipation
     # [New in EIP8453]
@@ -1253,6 +1362,34 @@ def get_round_base_reward(state: BeaconState, index: ValidatorIndex) -> Gwei:
     return increments * reward_per_increment
 ```
 
+#### New `get_head_vote_seat_reward`
+
+*Note*: Head votes are paid per seat, like sync committee participation: a flat
+reward per newly recorded seat, funded by the `HEAD_VOTE_WEIGHT` share of the
+round's total base rewards. Because seats are sampled by effective balance, a
+flat per-seat reward keeps each validator's expected head-vote income
+proportional to its stake. No head-vote rewards are paid during an inactivity
+leak.
+
+```python
+def get_head_vote_seat_reward(state: BeaconState) -> Gwei:
+    """
+    Return the reward for one newly recorded head vote seat.
+    """
+    if is_in_inactivity_leak(state):
+        return Gwei(0)
+    total_active_balance = get_total_active_balance(state)
+    total_increments = total_active_balance // EFFECTIVE_BALANCE_INCREMENT
+    reward_per_increment = (
+        EFFECTIVE_BALANCE_INCREMENT
+        * ROUND_REWARD_FACTOR
+        // integer_squareroot(total_active_balance)
+    )
+    total_round_rewards = total_increments * reward_per_increment
+    denominator = WEIGHT_DENOMINATOR * Uint64(SLOTS_PER_ROUND) * HEAD_VOTE_COMMITTEE_SIZE
+    return Gwei(total_round_rewards * HEAD_VOTE_WEIGHT // denominator)
+```
+
 #### New `get_flag_index_rewards`
 
 *Note*: This replaces `get_flag_index_deltas`. A validator without the flag
@@ -1644,6 +1781,8 @@ def process_operations(
     assert len(body.head_votes) <= MAX_HEAD_VOTES
     # [New in EIP8453]
     assert len(body.head_vote_support) == len(body.head_votes)
+    # [New in EIP8453]
+    assert len(body.safe_votes) <= MAX_SAFE_VOTES
 
     for_ops(body.proposer_slashings, process_proposer_slashing)
     for_ops(body.attester_slashings, process_attester_slashing)
@@ -1657,6 +1796,8 @@ def process_operations(
     # [New in EIP8453]
     for vote_index in range(len(body.head_votes)):
         process_head_vote(state, body.head_votes[vote_index], body.head_vote_support[vote_index])
+    # [New in EIP8453]
+    for_ops(body.safe_votes, process_safe_vote)
 ```
 
 ##### Legacy attester slashings
@@ -1728,7 +1869,8 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 ###### New `process_head_vote`
 
 *Note*: Head votes belong to the available chain. The beacon state records only
-which seats voted for the block of their slot, to weigh builder payments.
+which seats voted for the block of their slot, which weighs builder payments and
+pays each seat once.
 
 ```python
 def process_head_vote(
@@ -1762,15 +1904,73 @@ def process_head_vote(
     signing_root = compute_signing_root(data, domain)
     assert bls.FastAggregateVerify(pubkeys, signing_root, vote.signature)
 
-    # Record the seats that voted for the block of their slot
+    # Record the seats that voted for the block of their slot, paying each
+    # newly recorded seat
     if is_head_vote_same_slot(state, data):
         if compute_epoch_at_slot(data.slot) == get_current_epoch(state):
             participation_index = SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH
         else:
             participation_index = data.slot % SLOTS_PER_EPOCH
+        participation = state.head_vote_participation[participation_index]
+        seat_reward = get_head_vote_seat_reward(state)
+        new_seats = 0
         for position, index in enumerate(committee):
-            if index in vote.voter_indices:
-                state.head_vote_participation[participation_index][position] = Boolean(True)
+            if index in vote.voter_indices and not participation[position]:
+                participation[position] = Boolean(True)
+                increase_balance(state, index, seat_reward)
+                new_seats += 1
+        proposer_reward = Gwei(
+            new_seats * seat_reward * PROPOSER_WEIGHT // (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT)
+        )
+        increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
+```
+
+##### Safe votes
+
+###### New `process_safe_vote`
+
+*Note*: Safe votes belong to the available chain's stabilization and are read by
+the fork choice. Blocks relay them; the beacon state records only the
+participation flag. A block may include a safe vote from any active validator
+while the vote's round is within the expiry window, but only votes of the
+current round are credited: older included votes serve the fork choice alone.
+
+```python
+def process_safe_vote(state: BeaconState, vote: SafeVote) -> None:
+    data = vote.data
+    current_round = get_current_round(state)
+    assert data.round <= current_round
+    assert data.round + SAFE_VOTE_EXPIRY_ROUNDS >= current_round
+    assert data.payload_status in (
+        PAYLOAD_STATUS_EMPTY,
+        PAYLOAD_STATUS_FULL,
+        PAYLOAD_STATUS_PENDING,
+    )
+
+    epoch = compute_epoch_at_slot(compute_start_slot_at_round(data.round))
+    assert len(vote.voter_indices) > 0
+    assert list(vote.voter_indices) == sorted(set(vote.voter_indices))
+    for index in vote.voter_indices:
+        assert is_active_validator(state.validators[index], epoch)
+
+    # Verify signature
+    pubkeys = [state.validators[index].pubkey for index in vote.voter_indices]
+    domain = get_domain(state, DOMAIN_SAFE_VOTE, epoch)
+    signing_root = compute_signing_root(data, domain)
+    assert bls.FastAggregateVerify(pubkeys, signing_root, vote.signature)
+
+    # Credit participation for current-round votes
+    proposer_reward_numerator = 0
+    if data.round == current_round:
+        for index in vote.voter_indices:
+            if not has_flag(state.round_participation[index], SAFE_VOTE_FLAG_INDEX):
+                add_participation_flag(state, index, SAFE_VOTE_FLAG_INDEX)
+                base_reward = get_round_base_reward(state, index)
+                proposer_reward_numerator += base_reward * SAFE_VOTE_WEIGHT
+
+    reward_divisor = (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
+    proposer_reward = Gwei(proposer_reward_numerator // reward_divisor)
+    increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 ```
 
 #### Height events
@@ -1793,17 +1993,23 @@ def process_height_events(state: BeaconState) -> None:
     )
 
     if has_quorum(state, state.target_participation):
-        state.justified_checkpoint = state.target_checkpoint
-        # Keep only the newest pending justifications
-        if len(state.pending_finality) == PENDING_FINALITY_WINDOW:
-            state.pending_finality = state.pending_finality[1:]
-        state.pending_finality.append(
-            PendingFinality(
-                checkpoint=state.target_checkpoint,
-                slot=state.target_slot,
-                participation=HeightParticipation(data=[Boolean(False)] * len(state.validators)),
+        # [New in EIP8453]
+        # A nonjustifiable height advances on a target quorum without
+        # justifying, so healing never waits on a justification
+        if not state.nonjustifiable:
+            state.justified_checkpoint = state.target_checkpoint
+            # Keep only the newest pending justifications
+            if len(state.pending_finality) == PENDING_FINALITY_WINDOW:
+                state.pending_finality = state.pending_finality[1:]
+            state.pending_finality.append(
+                PendingFinality(
+                    checkpoint=state.target_checkpoint,
+                    slot=state.target_slot,
+                    participation=HeightParticipation(
+                        data=[Boolean(False)] * len(state.validators)
+                    ),
+                )
             )
-        )
         advance_height(state)
     elif (
         has_quorum(state, state.progress_participation)
@@ -1823,6 +2029,13 @@ def advance_height(state: BeaconState) -> None:
         root=Root(),
     )
     state.target_slot = state.latest_block_header.slot
+    # [New in EIP8453]
+    # Computed on entry into the height and fixed until it changes
+    height = state.target_checkpoint.height
+    finality_debt = height - state.finalized_checkpoint.height
+    state.nonjustifiable = Boolean(
+        height % NONJUSTIFIABLE_HEIGHT_PERIOD == 0 and finality_debt > FINALITY_DEBT_THRESHOLD
+    )
     state.target_participation = HeightParticipation(data=[Boolean(False)] * len(state.validators))
     state.progress_participation = HeightParticipation(
         data=[Boolean(False)] * len(state.validators)

@@ -137,6 +137,8 @@ def upgrade_to_eip8453(pre: heze.BeaconState) -> BeaconState:
         # [New in EIP8453]
         finalized_slot=compute_start_slot_at_epoch(pre.finalized_checkpoint.epoch),
         # [New in EIP8453]
+        nonjustifiable=Boolean(False),
+        # [New in EIP8453]
         target_participation=HeightParticipation(data=[Boolean(False)] * len(pre.validators)),
         # [New in EIP8453]
         progress_participation=HeightParticipation(data=[Boolean(False)] * len(pre.validators)),
