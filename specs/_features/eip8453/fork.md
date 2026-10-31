@@ -11,6 +11,7 @@
 - [Fork to EIP-8453](#fork-to-eip-8453)
   - [Fork trigger](#fork-trigger)
   - [Upgrading the state](#upgrading-the-state)
+  - [Upgrading the fork-choice store](#upgrading-the-fork-choice-store)
 
 <!-- mdformat-toc end -->
 
@@ -157,3 +158,37 @@ def upgrade_to_eip8453(pre: heze.BeaconState) -> BeaconState:
 
     return post
 ```
+
+### Upgrading the fork-choice store
+
+At the fork boundary the fork-choice store is re-anchored at the latest
+finalized block, mirroring
+[`get_forkchoice_store`](./fork-choice.md#modified-get_forkchoice_store):
+
+- Let `finalized_block` be the block of the pre-fork store's
+  `finalized_checkpoint.root`, and let `anchor_state` be its post-state,
+  processed through empty slots to the fork boundary with `process_slots` and
+  upgraded with `upgrade_to_eip8453`.
+- Construct the new store as `get_forkchoice_store` does from `anchor_state` and
+  `finalized_block`, skipping the state-root check, since the anchor state no
+  longer matches the block's `state_root`. The height checkpoints, the maximum
+  height and the finalized slot come from `anchor_state`'s upgraded fields; the
+  vote pools and the lock set start empty; the saved grades start at `None`; the
+  confirmed and stable records start at the anchor node.
+- Unfinalized post-anchor blocks held by the pre-fork store re-enter the new
+  store through `on_block`, in parent order, with their pre-fork post-states
+  carried over; each such block's receipt time is the fork boundary time.
+- The pre-fork store's LMD head is seeded as the boundary lock: with `head` the
+  node of the pre-fork `get_head` result and `boundary_ms` the fork boundary
+  time, call
+  `add_lock(store, boundary_ms + SLOW_LOCK_WINDOW * SLOT_DURATION_MS + get_head_vote_due_ms(), head)`.
+  Every block re-imported above carries equal weight in the new fork choice,
+  since no head votes exist yet; the boundary lock anchors the first head walks
+  on the chain the pre-fork attesters had already chosen, and it expires on the
+  slow-lock schedule once native confirmations take over.
+
+*Note*: Until the first full round after the fork, the grades are empty and
+every walk anchors at the boundary lock or the forkchoice root; the first head
+vote committees are served by the upgraded state's `head_vote_committee_window`.
+Accountable safety across the boundary is preserved on chain by
+`legacy_attester_slashings`.
