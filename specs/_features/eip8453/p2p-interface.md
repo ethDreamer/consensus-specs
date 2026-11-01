@@ -727,6 +727,13 @@ This topic is used to propagate aggregated FG attestations as
 `SignedAggregateAndProof`. Deduplication uses the attestation data and signers,
 since the aggregate's epoch is not signed.
 
+Data validity is tested against the head state pulled up to the current slot,
+since the target checkpoint back-fills as the state advances slots. A mismatch
+is ignored rather than rejected: validity ultimately depends on the inclusion
+state, which the including proposer chooses, and an honest aggregate trails the
+head state whenever confirmation trails the head without a bridging finality
+pair.
+
 ```python
 def validate_attestation_aggregate_gossip(
     seen: Seen,
@@ -742,21 +749,27 @@ def validate_attestation_aggregate_gossip(
     aggregate = message.aggregate
     aggregator_index = message.aggregator_index
 
-    state = store.block_states[get_head(store).root]
     current_slot = Slot((current_time_ms - store.genesis_time_ms) // SLOT_DURATION_MS)
     current_round = compute_round_at_slot(current_slot)
     epoch = aggregate.epoch
+
+    state = store.block_states[get_head(store).root]
+    if state.slot < current_slot:
+        state = state.copy()
+        process_slots(state, current_slot)
 
     # [IGNORE] This is the first aggregate from this aggregator for the data
     aggregator_key = (current_round, aggregator_index, hash_tree_root(aggregate.data))
     if aggregator_key in seen.attestation_aggregator_rounds:
         raise GossipIgnore("already seen this aggregator's aggregate for this data")
 
-    # [REJECT] The attestation data is well formed and valid for the state
+    # [REJECT] The attestation data is well formed
     if not is_well_formed_attestation_data(aggregate.data):
         raise GossipReject("attestation data is not well formed")
+
+    # [IGNORE] The attestation data is valid for the pulled-up head state
     if not is_valid_attestation_data(state, aggregate.data):
-        raise GossipReject("attestation data is not valid")
+        raise GossipIgnore("attestation data is stale for the head state")
 
     # [REJECT] The aggregation bits match the committees of the epoch
     if not is_valid_aggregation_bits(state, epoch, aggregate):
